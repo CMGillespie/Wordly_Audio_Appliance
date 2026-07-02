@@ -1,15 +1,24 @@
 # wordly_appliance/src/app.py
-# v0.10 — Wordly Audio Appliance — Mac POC
+# v0.12 — Wordly Audio Appliance — Mac POC
 # Phase 1: Mac simulation with Tkinter UI
 # Change log:
 #   v0.1 — initial build
 #   v0.2 — full UX rewrite: idle/streaming/error states, setup panels,
 #           split workaround (stop+500ms+start), background diagnostics,
 #           mute toggle, timer, red/green full-screen states
-#   v0.3 — replace split workaround with confirmed WSS command {"type":"split"}
-#           per Jim Firby (CTO). No disconnect needed. Instant transcript boundary.
-#   v0.4 — fix button text visibility, simplify network panel (Mac slaved to OS),
-#           add Quit Application button to idle screen
+#   v0.3 — replace split workaround with WSS split command per Jim Firby (CTO)
+#   v0.4 — fix button text visibility, simplify network panel, add Quit button
+#   v0.5 — replace tk.Button with tk.Label for Mac color fidelity on all buttons
+#   v0.6 — fix WSS protocol: 'command'→'type', add connectionCode 9005 (GOTCHA #9),
+#           fix result field 'transcript'→'text', fix mute to use stop/start protocol
+#   v0.7 — remove live session ID trace formatter (Tkinter re-entry bug), normalize on save
+#   v0.8 — fix Save & Close visibility, remove duplicate transcript log line
+#   v0.9 — fix disconnect: add end:true, block until sent before teardown
+#   v0.10 — fix dialogs appearing under app on macOS: parent=self + after(100) delay
+#   v0.11 — add session-ended screen with 60s countdown (local end + portal end),
+#           add confirmation dialog on Quit
+#   v0.12 — Wordly Setup accepts join link (join.wordly.ai/join/ABCD-1234?key=X)
+#           and parses session ID + passcode automatically
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -94,6 +103,19 @@ def format_session_input(raw: str) -> str:
     if len(cleaned) > 4:
         cleaned = cleaned[:4] + "-" + cleaned[4:8]
     return cleaned
+
+def parse_join_link(raw: str):
+    """Parse a Wordly join link and return (session_id, passcode) or (None, None).
+    Accepts: https://join.wordly.ai/join/ABCD-1234?key=654321
+    """
+    match = re.search(r'join\.wordly\.ai/join/([A-Za-z0-9]{4}-?[0-9]{4})', raw)
+    if not match:
+        return None, None
+    session_id = normalize_session_id(match.group(1))
+    # Extract key= parameter
+    key_match = re.search(r'[?&]key=([^&\s]+)', raw)
+    passcode = key_match.group(1) if key_match else ""
+    return session_id, passcode
 
 # ── NETWORK DIAGNOSTICS ───────────────────────────────────────────────────────
 
@@ -528,16 +550,48 @@ class WordlyAppliance(tk.Tk):
 
         # Session ID
         tk.Label(p, text="Session ID", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        sid_var = tk.StringVar(value=self.cfg["session_id"])
-        tk.Entry(p, textvariable=sid_var, font=("Courier", 18, "bold"),
+        # ── Join link or Session ID ──
+        tk.Label(p, text="Session ID  or  Join Link",
+                 font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
+        link_var = tk.StringVar(value=self.cfg.get("_raw_link", self.cfg["session_id"]))
+        link_entry = tk.Entry(p, textvariable=link_var, font=("Arial", 12),
                  bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", width=12, justify="center").pack(pady=(2, 4))
-        tk.Label(p, text="Type freely — normalized to ABCD-1234 on save",
-                 font=("Arial", 10), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w", pady=(0, 12))
+                 relief="flat", width=42)
+        link_entry.pack(fill="x", pady=(2, 2))
+
+        parse_hint = tk.Label(p, text="Paste a join link or type ABCD-1234 directly.",
+                 font=("Arial", 10), bg=BTN_DARK, fg=TEXT_DIM)
+        parse_hint.pack(anchor="w", pady=(0, 8))
+
+        sid_var = tk.StringVar(value=self.cfg["session_id"])
+        pc_var  = tk.StringVar(value=self.cfg["passcode"])
+
+        def on_link_change(*_):
+            raw = link_var.get().strip()
+            sid, key = parse_join_link(raw)
+            if sid:
+                sid_var.set(sid)
+                if key:
+                    pc_var.set(key)
+                parse_hint.config(
+                    text=f"✓ Parsed: {sid}  |  passcode {'set' if key else 'not found in link'}",
+                    fg="#AAFFAA")
+            else:
+                parse_hint.config(
+                    text="Paste a join link or type ABCD-1234 directly.",
+                    fg=TEXT_DIM)
+
+        link_var.trace_add("write", on_link_change)
+
+        # Session ID (read-only display when parsed from link, editable otherwise)
+        tk.Label(p, text="Session ID", font=("Arial", 11),
+                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
+        tk.Entry(p, textvariable=sid_var, font=("Courier", 16, "bold"),
+                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
+                 relief="flat", width=12, justify="center").pack(pady=(2, 8))
 
         # Passcode
         tk.Label(p, text="Passcode", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        pc_var = tk.StringVar(value=self.cfg["passcode"])
         tk.Entry(p, textvariable=pc_var, font=("Arial", 14),
                  bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                  relief="flat", show="•", width=24).pack(fill="x", pady=(2, 12))
@@ -596,9 +650,18 @@ class WordlyAppliance(tk.Tk):
         self._small_btn(p, "Test Audio (2s)", do_audio_test).pack(anchor="w", pady=(0, 8))
 
         def save():
-            sid = normalize_session_id(sid_var.get())
+            # Try link parse first, fall back to direct session ID field
+            raw_link = link_var.get().strip()
+            parsed_sid, parsed_key = parse_join_link(raw_link)
+            if parsed_sid:
+                sid = parsed_sid
+                if parsed_key and not pc_var.get().strip():
+                    pc_var.set(parsed_key)
+            else:
+                sid = normalize_session_id(sid_var.get())
             if not sid:
-                messagebox.showerror("Invalid Session ID", "Must be ABCD-1234 format.", parent=p)
+                messagebox.showerror("Invalid Session ID",
+                    "Enter a valid session ID (ABCD-1234) or paste a Wordly join link.", parent=p)
                 return
             if not pc_var.get().strip():
                 messagebox.showerror("Missing Passcode", "Passcode is required.", parent=p)
@@ -615,6 +678,7 @@ class WordlyAppliance(tk.Tk):
                 "presenter":   pres_var.get().strip(),
                 "device_idx":  idx,
                 "device_name": dev_name,
+                "_raw_link":   raw_link,
             })
             self._close_panel()
             self._build_idle()
@@ -715,6 +779,97 @@ class WordlyAppliance(tk.Tk):
     # ═══════════════════════════════════════════════════════════════════════════
     # ERROR SCREEN  (full red)
     # ═══════════════════════════════════════════════════════════════════════════
+
+    def _build_ended(self, reason: str = "local"):
+        """Session ended screen — shown on both local end and portal-initiated end."""
+        self._stop_all()
+        self._clear()
+        self.configure(bg=WORDLY_BLUE)
+        self.state = "ended"
+
+        # Header
+        hdr = tk.Frame(self, bg=WORDLY_BLUE)
+        hdr.pack(fill="x", padx=30, pady=(30, 0))
+        tk.Label(hdr, text="WORDLY", font=("Arial", 36, "bold"),
+                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(side="left")
+        tk.Label(hdr, text="  Audio Appliance", font=("Arial", 18),
+                 bg=WORDLY_BLUE, fg=ACCENT).pack(side="left", pady=6)
+
+        # Session ID if available
+        if self.cfg["session_id"]:
+            tk.Label(self, text=self.cfg["session_id"],
+                     font=("Courier", 22, "bold"),
+                     bg=WORDLY_BLUE, fg=TEXT_DIM).pack(pady=(30, 0))
+
+        # Main message
+        tk.Label(self, text="Session Ended",
+                 font=("Arial", 36, "bold"),
+                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(pady=(20, 0))
+
+        # Sub message — differs by reason
+        if reason == "portal":
+            sub = "This session was closed from the Wordly portal."
+        else:
+            sub = "Session ended successfully."
+        tk.Label(self, text=sub,
+                 font=("Arial", 16),
+                 bg=WORDLY_BLUE, fg=TEXT_DIM).pack(pady=(8, 0))
+
+        # Countdown label
+        self._countdown_val = 60
+        self._countdown_id  = None
+        self.countdown_lbl  = tk.Label(self,
+                 text=f"Returning to setup in {self._countdown_val}s...",
+                 font=("Arial", 13), bg=WORDLY_BLUE, fg=ACCENT)
+        self.countdown_lbl.pack(pady=(30, 0))
+
+        # Cancel countdown
+        cancel_btn = tk.Label(self, text="Stay on this screen",
+                              font=("Arial", 12), bg=WORDLY_BLUE_LT,
+                              fg=TEXT_DIM, padx=16, pady=8, cursor="hand2")
+        cancel_btn.bind("<Button-1>", lambda e: self._cancel_countdown())
+        cancel_btn.bind("<Enter>",    lambda e: cancel_btn.config(fg=TEXT_WHITE))
+        cancel_btn.bind("<Leave>",    lambda e: cancel_btn.config(fg=TEXT_DIM))
+        cancel_btn.pack(pady=(12, 0))
+
+        # Start session now button
+        start_now = tk.Label(self, text="START SESSION NOW →",
+                             font=("Arial", 18, "bold"),
+                             bg=ACCENT, fg=TEXT_WHITE,
+                             padx=20, pady=18, cursor="hand2")
+        start_now.bind("<Button-1>", lambda e: self._from_ended_to_idle())
+        start_now.bind("<Enter>",    lambda e: start_now.config(bg=self._lighten(ACCENT)))
+        start_now.bind("<Leave>",    lambda e: start_now.config(bg=ACCENT))
+        start_now.pack(fill="x", padx=30, pady=(40, 0))
+
+        # Start countdown
+        self._tick_countdown()
+
+    def _tick_countdown(self):
+        if self.state != "ended":
+            return
+        if self._countdown_val <= 0:
+            self._from_ended_to_idle()
+            return
+        if hasattr(self, 'countdown_lbl'):
+            self.countdown_lbl.config(
+                text=f"Returning to setup in {self._countdown_val}s...")
+        self._countdown_val -= 1
+        self._countdown_id = self.after(1000, self._tick_countdown)
+
+    def _cancel_countdown(self):
+        if self._countdown_id:
+            self.after_cancel(self._countdown_id)
+            self._countdown_id = None
+        if hasattr(self, 'countdown_lbl'):
+            self.countdown_lbl.config(text="Countdown cancelled — press button when ready.")
+
+    def _from_ended_to_idle(self):
+        if self._countdown_id:
+            self.after_cancel(self._countdown_id)
+            self._countdown_id = None
+        self.state = "idle"
+        self._build_idle()
 
     def _build_error(self, msg: str):
         self._clear()
@@ -820,14 +975,16 @@ class WordlyAppliance(tk.Tk):
         self.attributes("-topmost", False)
         if not result:
             return
-        self._stop_all()
-        self._build_idle()
+        self._build_ended(reason="local")
 
     def _on_wss_status(self, status: str):
         self.after(0, lambda: self._handle_wss_status(status))
 
     def _handle_wss_status(self, status: str):
-        if status == "error" and self.state in ("streaming", "muted", "connecting"):
+        if status == "ended" and self.state in ("streaming", "muted"):
+            # Portal ended the session — clean transition, not an error
+            self._build_ended(reason="portal")
+        elif status == "error" and self.state in ("streaming", "muted", "connecting"):
             # Run diagnostics in background then show error screen
             def _diag():
                 msg = diagnose_connection()
@@ -907,7 +1064,7 @@ class WordlyAppliance(tk.Tk):
         if self.wss:
             self.wss.disconnect()
             self.wss = None
-        self.state = "idle"
+        # Note: do not reset state here — caller manages state transition
 
     def _clear(self):
         self._close_panel()
@@ -931,6 +1088,17 @@ class WordlyAppliance(tk.Tk):
         return f"#{r:02X}{g:02X}{b:02X}"
 
     def _on_quit(self):
+        self.lift()
+        self.focus_force()
+        self.after(100, self._confirm_quit)
+
+    def _confirm_quit(self):
+        self.attributes("-topmost", True)
+        self.update()
+        result = messagebox.askyesno("Quit", "Quit Wordly Audio Appliance?", parent=self)
+        self.attributes("-topmost", False)
+        if not result:
+            return
         self._stop_all()
         self.destroy()
 
