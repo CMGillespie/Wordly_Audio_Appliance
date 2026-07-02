@@ -1,5 +1,5 @@
 # wordly_appliance/src/app.py
-# v0.3 — Wordly Audio Appliance — Mac POC
+# v0.10 — Wordly Audio Appliance — Mac POC
 # Phase 1: Mac simulation with Tkinter UI
 # Change log:
 #   v0.1 — initial build
@@ -8,6 +8,8 @@
 #           mute toggle, timer, red/green full-screen states
 #   v0.3 — replace split workaround with confirmed WSS command {"type":"split"}
 #           per Jim Firby (CTO). No disconnect needed. Instant transcript boundary.
+#   v0.4 — fix button text visibility, simplify network panel (Mac slaved to OS),
+#           add Quit Application button to idle screen
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -49,6 +51,10 @@ CHUNK_FRAMES  = int(SAMPLE_RATE * CHUNK_MS / 1000)
 # GOTCHA #8: split command confirmed by Jim Firby (CTO) — {"type":"split"} sent as text frame
 # No disconnect or delay required. Instant transcript boundary.
 
+# GOTCHA #9: connectionCode is a Wordly-supplied identifier (currently '9005') that must
+# be included in every connect message. Appears in Wordly logs for support tracing.
+CONNECTION_CODE = '9005'
+
 # ── COLORS ────────────────────────────────────────────────────────────────────
 
 WORDLY_BLUE    = "#1B3A6B"
@@ -65,7 +71,7 @@ GREEN_PULSE2   = "#2E5C3A"
 RED_BG         = "#7F0000"
 RED_DARK       = "#5C0000"
 AMBER          = "#FFC107"
-BTN_DARK       = "#0D2140"
+BTN_DARK       = "#1E3F6E"
 BTN_HOVER      = "#1B3A6B"
 BTN_SPLIT      = "#1A4A2E"
 BTN_END        = "#4A0000"
@@ -178,9 +184,10 @@ class AudioEngine:
 # ── WSS STREAMER ──────────────────────────────────────────────────────────────
 
 class WSSStreamer:
-    def __init__(self, session_id, passcode, on_status, on_transcript):
+    def __init__(self, session_id, passcode, on_status, on_transcript, name=""):
         self.session_id  = session_id
         self.passcode    = passcode
+        self.name        = name
         self.on_status   = on_status
         self.on_transcript = on_transcript
         self.ws          = None
@@ -203,12 +210,17 @@ class WSSStreamer:
     def send_split(self):
         """Transcript boundary. GOTCHA #8 — confirmed by Jim Firby (CTO).
         Sends {"type":"split"} as a text frame. No disconnect needed."""
-        async def _split():
+        self.send_control({"type": "split"})
+        log.info("WSS split sent — transcript boundary created")
+
+    def send_control(self, msg: dict):
+        """Send any JSON control message on the live WSS connection."""
+        async def _send():
             if self.ws and self.connected:
-                await self.ws.send(json.dumps({"type": "split"}))
-                log.info("WSS split sent — transcript boundary created")
+                await self.ws.send(json.dumps(msg))
+                log.info(f"Control sent: {msg}")
         if self.loop:
-            asyncio.run_coroutine_threadsafe(_split(), self.loop)
+            asyncio.run_coroutine_threadsafe(_send(), self.loop)
 
     def stop(self):
         self.running = False
@@ -240,23 +252,33 @@ class WSSStreamer:
                 backoff = min(backoff * 2, 30)
 
     async def _handshake(self):
-        await self.ws.send(json.dumps({
-            "command": "connect",
+        # GOTCHA #9: use 'type' not 'command'. Include connectionCode in every connect.
+        connect_msg = {
+            "type": "connect",
             "presentationCode": self.session_id,
-            "accessKey": self.passcode
-        }))
+            "accessKey": self.passcode,
+            "connectionCode": CONNECTION_CODE,
+        }
+        if self.name:
+            connect_msg["name"] = self.name
+        if self.context:
+            connect_msg["context"] = self.context
+        await self.ws.send(json.dumps(connect_msg))
+        log.info(f"Sent connect: presentationCode={self.session_id}")
+
         resp = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=10))
         log.info(f"Connect response: {resp}")
         if not resp.get("success", False):
             raise Exception(f"Rejected: {resp.get('message', 'unknown')}")
+
         await self.ws.send(json.dumps({
-            "command": "start",
+            "type": "start",
             "languageCode": "en",
             "sampleRate": SAMPLE_RATE
         }))
         self.connected = True
         self.on_status("connected")
-        log.info("WSS handshake complete")
+        log.info("WSS handshake complete — streaming active")
 
     async def _stream_loop(self):
         r = asyncio.create_task(self._recv())
@@ -285,25 +307,40 @@ class WSSStreamer:
             if isinstance(msg, str):
                 try:
                     data = json.loads(msg)
-                    if data.get("command") == "result":
+                    msg_type = data.get("type", "")
+                    if msg_type == "result":
                         self.context = data.get("context")
-                        t = data.get("transcript", "")
-                        if t:
+                        t = data.get("text", "")
+                        if t and data.get("final", False):
                             self.on_transcript(t)
+                    elif msg_type == "status":
+                        log.info(f"Status update: {data}")
+                    elif msg_type == "error":
+                        log.warning(f"Server error: {data.get('message')}")
+                    elif msg_type == "end":
+                        log.info("Session ended by server")
+                        self.on_status("ended")
                 except Exception as e:
                     log.warning(f"Recv error: {e}")
 
     async def _disconnect(self):
         if self.ws and self.connected:
             try:
-                await self.ws.send(json.dumps({"command": "stop"}))
-                await self.ws.send(json.dumps({"command": "disconnect"}))
+                await self.ws.send(json.dumps({"type": "stop"}))
+                await asyncio.sleep(0.2)  # let stop process
+                await self.ws.send(json.dumps({"type": "disconnect", "end": True}))
+                await asyncio.sleep(0.3)  # let disconnect send before teardown
+                log.info("WSS disconnect sent cleanly")
             except Exception as e:
-                log.warning(f"Disconnect: {e}")
+                log.warning(f"Disconnect error: {e}")
 
     def disconnect(self):
-        if self.loop:
-            asyncio.run_coroutine_threadsafe(self._disconnect(), self.loop)
+        if self.loop and self.connected:
+            future = asyncio.run_coroutine_threadsafe(self._disconnect(), self.loop)
+            try:
+                future.result(timeout=2.0)  # wait up to 2s for clean disconnect
+            except Exception as e:
+                log.warning(f"Disconnect wait error: {e}")
         self.stop()
 
 # ── MAIN APP ──────────────────────────────────────────────────────────────────
@@ -396,29 +433,33 @@ class WordlyAppliance(tk.Tk):
         start_color = ACCENT if ready else "#334466"
         start_fg    = TEXT_WHITE if ready else "#556688"
 
-        self.start_btn = tk.Button(
+        self.start_btn = tk.Label(
             self, text="START SESSION",
             font=("Arial", 22, "bold"),
             bg=start_color, fg=start_fg,
-            relief="flat", padx=0, pady=24,
+            padx=0, pady=24,
             cursor="hand2" if ready else "arrow",
-            state="normal" if ready else "disabled",
-            command=self._on_start
         )
+        if ready:
+            self.start_btn.bind("<Button-1>", lambda e: self._on_start())
+            self.start_btn.bind("<Enter>", lambda e: self.start_btn.config(bg=self._lighten(start_color)))
+            self.start_btn.bind("<Leave>", lambda e: self.start_btn.config(bg=start_color))
         self.start_btn.pack(fill="x", padx=30, pady=(40, 0))
 
         if not ready:
             tk.Label(self, text="Configure session and audio device before starting.",
                      font=("Arial", 11), bg=WORDLY_BLUE, fg=TEXT_DIM).pack(pady=(6, 0))
 
-        # ── Bottom setup buttons ──
+        # ── Bottom setup buttons + quit ──
         bot = tk.Frame(self, bg=WORDLY_BLUE)
         bot.pack(side="bottom", fill="x", padx=30, pady=30)
 
         self._small_btn(bot, "🌐  Network Setup", self._open_network_setup).pack(
-            side="left", expand=True, fill="x", padx=(0, 10))
+            side="left", expand=True, fill="x", padx=(0, 8))
         self._small_btn(bot, "🎙  Wordly Setup", self._open_wordly_setup).pack(
-            side="left", expand=True, fill="x")
+            side="left", expand=True, fill="x", padx=(0, 8))
+        self._small_btn(bot, "✕  Quit", self._on_quit, bg="#3A1A1A").pack(
+            side="left", fill="x", padx=(0, 0))
 
     # ═══════════════════════════════════════════════════════════════════════════
     # SETUP PANELS (slide over idle screen)
@@ -428,45 +469,58 @@ class WordlyAppliance(tk.Tk):
         self._close_panel()
         p = self._make_panel("🌐  Network Setup")
 
-        tk.Label(p, text="WiFi SSID", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
+        # Phase 1: Mac slaves off OS WiFi. Fields stored but inactive until Phase 2 (Pi).
+        tk.Label(p, text="PHASE 1 — Mac Mode",
+                 font=("Arial", 11, "bold"), bg=BTN_DARK, fg=AMBER).pack(anchor="w", pady=(0, 4))
+        tk.Label(p,
+                 text="Network connection is managed by macOS on this machine.\n"
+                      "WiFi credentials below are stored for Phase 2 Pi deployment only.",
+                 font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM,
+                 justify="left", wraplength=480).pack(anchor="w", pady=(0, 16))
+
+        # SSID — stored but disabled
+        tk.Label(p, text="WiFi SSID  (Phase 2 / Pi only)", font=("Arial", 11),
+                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
         ssid_var = tk.StringVar(value=self.cfg["wifi_ssid"])
-        tk.Entry(p, textvariable=ssid_var, font=("Arial", 14),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", width=30).pack(fill="x", pady=(2, 12))
+        ssid_entry = tk.Entry(p, textvariable=ssid_var, font=("Arial", 14),
+                 bg="#111E30", fg="#556688", insertbackground=TEXT_WHITE,
+                 relief="flat", width=30, state="disabled",
+                 disabledbackground="#111E30", disabledforeground="#445566")
+        ssid_entry.pack(fill="x", pady=(2, 12))
 
-        tk.Label(p, text="WiFi Password", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
+        # Password — stored but disabled
+        tk.Label(p, text="WiFi Password  (Phase 2 / Pi only)", font=("Arial", 11),
+                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
         pass_var = tk.StringVar(value=self.cfg["wifi_pass"])
-        tk.Entry(p, textvariable=pass_var, font=("Arial", 14),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", show="•", width=30).pack(fill="x", pady=(2, 12))
+        pass_entry = tk.Entry(p, textvariable=pass_var, font=("Arial", 14),
+                 bg="#111E30", fg="#556688", insertbackground=TEXT_WHITE,
+                 relief="flat", show="•", width=30, state="disabled",
+                 disabledbackground="#111E30", disabledforeground="#445566")
+        pass_entry.pack(fill="x", pady=(2, 16))
 
-        # Connection test result
-        test_result = tk.Label(p, text="", font=("Arial", 12),
-                                bg=BTN_DARK, fg=AMBER, wraplength=480, justify="left")
+        # Connection test — still useful on Mac
+        tk.Label(p, text="CONNECTION TEST", font=("Arial", 11, "bold"),
+                 bg=BTN_DARK, fg=TEXT_WHITE).pack(anchor="w", pady=(8, 4))
+        test_result = tk.Label(p, text="Press button to test network + Wordly reachability.",
+                                font=("Arial", 12), bg=BTN_DARK, fg=TEXT_DIM,
+                                wraplength=480, justify="left")
         test_result.pack(anchor="w", pady=(0, 8))
 
         def do_test():
             test_result.config(text="Testing...", fg=AMBER)
             p.update()
             msg = diagnose_connection()
-            ok  = "Cannot" not in msg and "issue" not in msg.lower() and "fail" not in msg.lower()
-            test_result.config(text=msg, fg="#66FF66" if ok else RED_BG)
+            ok  = not any(w in msg.lower() for w in ["cannot", "issue", "fail", "error", "lost"])
+            test_result.config(text=msg, fg=TEXT_WHITE if ok else AMBER)
 
         self._small_btn(p, "Test Connection", do_test).pack(anchor="w", pady=(0, 16))
 
-        note = ("Phase 1 note: On Mac, WiFi is managed by the OS.\n"
-                "SSID/password fields are stored for Pi deployment in Phase 2.")
-        tk.Label(p, text=note, font=("Arial", 10), bg=BTN_DARK,
-                 fg=TEXT_DIM, justify="left", wraplength=480).pack(anchor="w")
-
-        def save():
-            self.cfg["wifi_ssid"] = ssid_var.get().strip()
-            self.cfg["wifi_pass"] = pass_var.get().strip()
-            self._close_panel()
-            self._build_idle()
-
-        self._small_btn(p, "✓  Save & Close", save, fg=GREEN_LIVE).pack(
-            side="bottom", fill="x", pady=(16, 0))
+        save_btn = tk.Label(p, text="✓  Close", font=("Arial", 13, "bold"),
+                            bg="#1A4A2E", fg="#AAFFAA", padx=12, pady=14, cursor="hand2")
+        save_btn.bind("<Button-1>", lambda e: self._close_panel())
+        save_btn.bind("<Enter>",    lambda e: save_btn.config(bg="#256040"))
+        save_btn.bind("<Leave>",    lambda e: save_btn.config(bg="#1A4A2E"))
+        save_btn.pack(side="bottom", fill="x", pady=(16, 0))
 
     def _open_wordly_setup(self):
         self._close_panel()
@@ -475,19 +529,11 @@ class WordlyAppliance(tk.Tk):
         # Session ID
         tk.Label(p, text="Session ID", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
         sid_var = tk.StringVar(value=self.cfg["session_id"])
-
-        def on_sid_type(*_):
-            raw = sid_var.get()
-            fmt = format_session_input(raw)
-            if fmt != raw:
-                sid_var.set(fmt)
-
-        sid_var.trace_add("write", on_sid_type)
         tk.Entry(p, textvariable=sid_var, font=("Courier", 18, "bold"),
                  bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
                  relief="flat", width=12, justify="center").pack(pady=(2, 4))
-        tk.Label(p, text="Format: ABCD-1234", font=("Arial", 10),
-                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w", pady=(0, 12))
+        tk.Label(p, text="Type freely — normalized to ABCD-1234 on save",
+                 font=("Arial", 10), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w", pady=(0, 12))
 
         # Passcode
         tk.Label(p, text="Passcode", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
@@ -573,8 +619,12 @@ class WordlyAppliance(tk.Tk):
             self._close_panel()
             self._build_idle()
 
-        self._small_btn(p, "✓  Save & Close", save, fg=GREEN_LIVE).pack(
-            side="bottom", fill="x", pady=(16, 0))
+        save_btn = tk.Label(p, text="✓  Save & Close", font=("Arial", 13, "bold"),
+                            bg="#1A4A2E", fg="#AAFFAA", padx=12, pady=14, cursor="hand2")
+        save_btn.bind("<Button-1>", lambda e: save())
+        save_btn.bind("<Enter>",    lambda e: save_btn.config(bg="#256040"))
+        save_btn.bind("<Leave>",    lambda e: save_btn.config(bg="#1A4A2E"))
+        save_btn.pack(side="bottom", fill="x", pady=(16, 0))
 
     def _make_panel(self, title: str) -> tk.Frame:
         """Creates a full-screen overlay panel on top of idle screen."""
@@ -639,11 +689,13 @@ class WordlyAppliance(tk.Tk):
         self.meter_bar.pack(fill="x")
 
         # Mute button (big center)
-        self.mute_btn = tk.Button(self, text="MUTE",
-                                   font=("Arial", 20, "bold"),
-                                   bg=BTN_MUTE, fg=TEXT_WHITE,
-                                   relief="flat", padx=40, pady=16,
-                                   cursor="hand2", command=self._on_mute)
+        self.mute_btn = tk.Label(self, text="MUTE",
+                                  font=("Arial", 20, "bold"),
+                                  bg=BTN_MUTE, fg=TEXT_WHITE,
+                                  padx=40, pady=16, cursor="hand2")
+        self.mute_btn.bind("<Button-1>", lambda e: self._on_mute())
+        self.mute_btn.bind("<Enter>", lambda e: self.mute_btn.config(bg=self._lighten(BTN_MUTE)))
+        self.mute_btn.bind("<Leave>", lambda e: self.mute_btn.config(bg=BTN_MUTE if self.state=="streaming" else BTN_UNMUTE))
         self.mute_btn.pack(pady=(30, 0))
 
         # Bottom: Split + End
@@ -651,9 +703,9 @@ class WordlyAppliance(tk.Tk):
         bot.pack(side="bottom", fill="x", padx=30, pady=24)
 
         self._small_btn(bot, "✂  Split Session", self._on_split,
-                         bg=BTN_SPLIT).pack(side="left", expand=True, fill="x", padx=(0, 10))
+                         bg=BTN_SPLIT, fg=TEXT_WHITE).pack(side="left", expand=True, fill="x", padx=(0, 10))
         self._small_btn(bot, "■  End Session", self._on_end,
-                         bg=BTN_END).pack(side="left", expand=True, fill="x")
+                         bg=BTN_END, fg=TEXT_WHITE).pack(side="left", expand=True, fill="x")
 
         # Start timer and meter
         self.timer_start = time.time()
@@ -686,19 +738,21 @@ class WordlyAppliance(tk.Tk):
                  bg=RED_BG, fg="#CC8888").pack(pady=(24, 0))
 
         self._small_btn(self, "■  Give Up / End Session", self._on_end,
-                         bg=RED_DARK).pack(pady=(40, 0), padx=60, fill="x")
+                         bg=RED_DARK, fg=TEXT_WHITE).pack(pady=(40, 0), padx=60, fill="x")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # CONTROLS
     # ═══════════════════════════════════════════════════════════════════════════
 
     def _on_start(self):
+        log.info(f"Starting — session_id={self.cfg['session_id']!r} passcode={'SET' if self.cfg['passcode'] else 'EMPTY'} device={self.cfg['device_idx']}")
         self._build_streaming()
         # Start WSS
         self.wss = WSSStreamer(
-            session_id  = self.cfg["session_id"],
-            passcode    = self.cfg["passcode"],
-            on_status   = self._on_wss_status,
+            session_id    = self.cfg["session_id"],
+            passcode      = self.cfg["passcode"],
+            name          = self.cfg.get("presenter", ""),
+            on_status     = self._on_wss_status,
             on_transcript = self._noop_transcript
         )
         self.wss.start()
@@ -719,6 +773,9 @@ class WordlyAppliance(tk.Tk):
             self.mute_btn.config(text="UNMUTE", bg=BTN_UNMUTE)
             self.status_lbl.config(text="⏸ MUTED")
             self._start_pulse()
+            # Doc: send 'stop' to pause transcription when muting
+            if self.wss:
+                self.wss.send_control({"type": "stop"})
         elif self.state == "muted":
             self.state = "streaming"
             self.mute_btn.config(text="MUTE", bg=BTN_MUTE)
@@ -726,19 +783,42 @@ class WordlyAppliance(tk.Tk):
             self.configure(bg=GREEN_LIVE)
             self._stop_pulse()
             self._refresh_streaming_bg(GREEN_LIVE)
+            # Doc: send 'start' to resume transcription when unmuting
+            if self.wss:
+                self.wss.send_control({"type": "start", "languageCode": "en", "sampleRate": SAMPLE_RATE})
 
     def _on_split(self):
         # GOTCHA #8 — WSS split command confirmed by Jim Firby (CTO)
         # {"type":"split"} = instant transcript boundary, no reconnect, no audio interruption
-        if not messagebox.askyesno("Split Session",
-                                    "Split will close the current transcript and immediately start a new one.\n\nAudio will not be interrupted.\n\nProceed?"):
+        self.lift()
+        self.focus_force()
+        self.after(100, self._confirm_split)
+
+    def _confirm_split(self):
+        self.attributes("-topmost", True)
+        self.update()
+        result = messagebox.askyesno("Split Session",
+                                      "Split will close the current transcript and immediately start a new one.\n\nAudio will not be interrupted.\n\nProceed?",
+                                      parent=self)
+        self.attributes("-topmost", False)
+        if not result:
             return
         if self.wss:
             self.wss.send_split()
             log.info("Split command sent — transcript boundary created")
 
     def _on_end(self):
-        if not messagebox.askyesno("End Session", "End streaming and return to setup?"):
+        self.lift()
+        self.focus_force()
+        self.after(100, self._confirm_end)
+
+    def _confirm_end(self):
+        self.attributes("-topmost", True)
+        self.update()
+        result = messagebox.askyesno("End Session", "End streaming and return to setup?",
+                                      parent=self)
+        self.attributes("-topmost", False)
+        if not result:
             return
         self._stop_all()
         self._build_idle()
@@ -758,7 +838,7 @@ class WordlyAppliance(tk.Tk):
             self._build_streaming()
 
     def _noop_transcript(self, text):
-        log.info(f"Transcript: {text}")
+        log.info(f"Transcript (final): {text}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # TIMER + METER + PULSE
@@ -835,13 +915,12 @@ class WordlyAppliance(tk.Tk):
             w.destroy()
 
     def _small_btn(self, parent, text, cmd, bg=BTN_DARK, fg=TEXT_WHITE):
-        btn = tk.Button(parent, text=text, font=("Arial", 13, "bold"),
-                         bg=bg, fg=fg, relief="flat",
-                         padx=12, pady=12, cursor="hand2", command=cmd)
-        def enter(e): btn.config(bg=self._lighten(bg))
-        def leave(e): btn.config(bg=bg)
-        btn.bind("<Enter>", enter)
-        btn.bind("<Leave>", leave)
+        # Use Label instead of Button — Mac Tkinter ignores bg/fg on native Button widgets
+        btn = tk.Label(parent, text=text, font=("Arial", 13, "bold"),
+                       bg=bg, fg=fg, padx=12, pady=12, cursor="hand2")
+        btn.bind("<Button-1>", lambda e: cmd())
+        btn.bind("<Enter>",    lambda e: btn.config(bg=self._lighten(bg)))
+        btn.bind("<Leave>",    lambda e: btn.config(bg=bg))
         return btn
 
     def _lighten(self, hex_color: str) -> str:
