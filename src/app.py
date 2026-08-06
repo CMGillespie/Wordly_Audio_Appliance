@@ -1,6 +1,6 @@
 # wordly_appliance/src/app.py
-# v0.12 — Wordly Audio Appliance — Mac POC
-# Phase 1: Mac simulation with Tkinter UI
+# v0.13 — Wordly Audio Appliance
+# Phase 2: Pi hardware deployment
 # Change log:
 #   v0.1 — initial build
 #   v0.2 — full UX rewrite: idle/streaming/error states, setup panels,
@@ -19,6 +19,8 @@
 #           add confirmation dialog on Quit
 #   v0.12 — Wordly Setup accepts join link (join.wordly.ai/join/ABCD-1234?key=X)
 #           and parses session ID + passcode automatically
+#   v0.13 — landscape layout (800x480), fullscreen mode, real network status panel,
+#           platform detection (Mac vs Pi)
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -87,8 +89,9 @@ BTN_END        = "#4A0000"
 BTN_MUTE       = "#3A5A3A"
 BTN_UNMUTE     = "#1A3A1A"
 
-APP_W = 600
-APP_H = 700
+APP_W = 800
+APP_H = 480
+FULLSCREEN = os.uname().sysname == 'Linux'  # fullscreen on Pi, windowed on Mac
 
 # ── SESSION ID ────────────────────────────────────────────────────────────────
 
@@ -118,6 +121,38 @@ def parse_join_link(raw: str):
     return session_id, passcode
 
 # ── NETWORK DIAGNOSTICS ───────────────────────────────────────────────────────
+
+def get_network_status() -> dict:
+    """Returns current network info: interface, IP, SSID if WiFi."""
+    info = {"ip": "", "interface": "", "ssid": "", "connected": False}
+    try:
+        # Get default route interface
+        result = subprocess.run(["ip", "route", "get", "8.8.8.8"],
+                                 capture_output=True, text=True, timeout=3)
+        for part in result.stdout.split():
+            if part == "dev":
+                info["interface"] = result.stdout.split()[result.stdout.split().index("dev") + 1]
+                break
+        # Get IP
+        ip_result = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
+        ips = ip_result.stdout.strip().split()
+        if ips:
+            info["ip"] = ips[0]
+            info["connected"] = True
+        # Get SSID if WiFi
+        if info["interface"].startswith("wl"):
+            ssid_result = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=2)
+            info["ssid"] = ssid_result.stdout.strip()
+    except Exception:
+        pass
+    # Mac fallback
+    if not info["ip"]:
+        try:
+            info["ip"] = socket.gethostbyname(socket.gethostname())
+            info["connected"] = bool(info["ip"])
+        except Exception:
+            pass
+    return info
 
 def diagnose_connection() -> str:
     """Returns a plain-English best-guess error message."""
@@ -380,6 +415,8 @@ class WordlyAppliance(tk.Tk):
         self.geometry(f"{APP_W}x{APP_H}")
         self.resizable(False, False)
         self.configure(bg=WORDLY_BLUE)
+        if FULLSCREEN:
+            self.attributes("-fullscreen", True)
 
         # Config state
         self.cfg = {
@@ -418,70 +455,89 @@ class WordlyAppliance(tk.Tk):
         self.configure(bg=WORDLY_BLUE)
         self.state = "idle"
 
-        # ── Header ──
-        hdr = tk.Frame(self, bg=WORDLY_BLUE)
-        hdr.pack(fill="x", padx=30, pady=(30, 0))
-        tk.Label(hdr, text="WORDLY", font=("Arial", 36, "bold"),
-                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(side="left")
-        tk.Label(hdr, text="  Audio Appliance", font=("Arial", 18),
-                 bg=WORDLY_BLUE, fg=ACCENT).pack(side="left", pady=6)
+        # ── Landscape layout: left panel (info) + right panel (start button) ──
+        main = tk.Frame(self, bg=WORDLY_BLUE)
+        main.pack(fill="both", expand=True, padx=0, pady=0)
 
-        # ── Session summary card ──
-        card = tk.Frame(self, bg=WORDLY_BLUE_LT, padx=24, pady=20)
-        card.pack(fill="x", padx=30, pady=(30, 0))
+        # Left column — branding + session info
+        left = tk.Frame(main, bg=WORDLY_BLUE, width=420)
+        left.pack(side="left", fill="both", expand=True, padx=(20, 10), pady=16)
+        left.pack_propagate(False)
+
+        # Branding
+        hdr = tk.Frame(left, bg=WORDLY_BLUE)
+        hdr.pack(fill="x", pady=(0, 10))
+        tk.Label(hdr, text="WORDLY", font=("Arial", 26, "bold"),
+                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(side="left")
+        tk.Label(hdr, text="  Audio Appliance", font=("Arial", 13),
+                 bg=WORDLY_BLUE, fg=ACCENT).pack(side="left")
+
+        # Session card
+        card = tk.Frame(left, bg=WORDLY_BLUE_LT, padx=16, pady=12)
+        card.pack(fill="x")
 
         if self.cfg["session_id"]:
             tk.Label(card, text=self.cfg["session_id"],
-                     font=("Courier", 32, "bold"), bg=WORDLY_BLUE_LT, fg=TEXT_WHITE).pack(anchor="w")
+                     font=("Courier", 24, "bold"), bg=WORDLY_BLUE_LT, fg=TEXT_WHITE).pack(anchor="w")
             if self.cfg["presenter"]:
                 tk.Label(card, text=self.cfg["presenter"],
-                         font=("Arial", 16), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w")
+                         font=("Arial", 13), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w")
             dev = self.cfg["device_name"] or "No audio device selected"
             tk.Label(card, text=f"🎙  {dev}",
-                     font=("Arial", 13), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w", pady=(8, 0))
+                     font=("Arial", 11), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w", pady=(4, 0))
         else:
-            tk.Label(card, text="Not configured", font=("Arial", 20),
+            tk.Label(card, text="Not configured", font=("Arial", 16),
                      bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w")
-            tk.Label(card, text="Use Wordly Setup below to enter session details.",
-                     font=("Arial", 13), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w", pady=(6, 0))
+            tk.Label(card, text="Use Wordly Setup to enter session details.",
+                     font=("Arial", 11), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w", pady=(4, 0))
 
-        # WiFi status
-        wifi_txt = f"WiFi: {self.cfg['wifi_ssid']}" if self.cfg["wifi_ssid"] else "WiFi: not configured (using OS connection)"
-        tk.Label(card, text=f"🌐  {wifi_txt}",
-                 font=("Arial", 13), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w", pady=(4, 0))
+        # Network status — live from system
+        net = get_network_status()
+        if net["ssid"]:
+            net_txt = f"🌐  {net['ssid']}  ({net['ip']})"
+        elif net["ip"]:
+            net_txt = f"🌐  Wired  ({net['ip']})"
+        else:
+            net_txt = "🌐  No network connection"
+        tk.Label(left, text=net_txt, font=("Arial", 11),
+                 bg=WORDLY_BLUE, fg=TEXT_DIM).pack(anchor="w", pady=(8, 0))
 
-        # ── BIG START ──
+        # Bottom buttons
+        bot = tk.Frame(left, bg=WORDLY_BLUE)
+        bot.pack(side="bottom", fill="x", pady=(0, 0))
+        self._small_btn(bot, "🌐  Network", self._open_network_setup).pack(
+            side="left", expand=True, fill="x", padx=(0, 6))
+        self._small_btn(bot, "🎙  Wordly Setup", self._open_wordly_setup).pack(
+            side="left", expand=True, fill="x", padx=(0, 6))
+        self._small_btn(bot, "✕  Quit", self._on_quit, bg="#3A1A1A").pack(
+            side="left", fill="x")
+
+        # Right column — START button
+        right = tk.Frame(main, bg=WORDLY_BLUE, width=360)
+        right.pack(side="right", fill="both", padx=(10, 20), pady=16)
+        right.pack_propagate(False)
+
         ready = bool(self.cfg["session_id"] and self.cfg["passcode"] and self.cfg["device_idx"] is not None)
         start_color = ACCENT if ready else "#334466"
         start_fg    = TEXT_WHITE if ready else "#556688"
 
         self.start_btn = tk.Label(
-            self, text="START SESSION",
-            font=("Arial", 22, "bold"),
+            right, text="START\nSESSION",
+            font=("Arial", 24, "bold"),
             bg=start_color, fg=start_fg,
-            padx=0, pady=24,
             cursor="hand2" if ready else "arrow",
+            justify="center"
         )
+        self.start_btn.pack(fill="both", expand=True)
         if ready:
             self.start_btn.bind("<Button-1>", lambda e: self._on_start())
             self.start_btn.bind("<Enter>", lambda e: self.start_btn.config(bg=self._lighten(start_color)))
             self.start_btn.bind("<Leave>", lambda e: self.start_btn.config(bg=start_color))
-        self.start_btn.pack(fill="x", padx=30, pady=(40, 0))
 
         if not ready:
-            tk.Label(self, text="Configure session and audio device before starting.",
-                     font=("Arial", 11), bg=WORDLY_BLUE, fg=TEXT_DIM).pack(pady=(6, 0))
-
-        # ── Bottom setup buttons + quit ──
-        bot = tk.Frame(self, bg=WORDLY_BLUE)
-        bot.pack(side="bottom", fill="x", padx=30, pady=30)
-
-        self._small_btn(bot, "🌐  Network Setup", self._open_network_setup).pack(
-            side="left", expand=True, fill="x", padx=(0, 8))
-        self._small_btn(bot, "🎙  Wordly Setup", self._open_wordly_setup).pack(
-            side="left", expand=True, fill="x", padx=(0, 8))
-        self._small_btn(bot, "✕  Quit", self._on_quit, bg="#3A1A1A").pack(
-            side="left", fill="x", padx=(0, 0))
+            tk.Label(right, text="Configure\nsession first",
+                     font=("Arial", 10), bg=WORDLY_BLUE, fg=TEXT_DIM,
+                     justify="center").pack(pady=(4, 0))
 
     # ═══════════════════════════════════════════════════════════════════════════
     # SETUP PANELS (slide over idle screen)
@@ -491,36 +547,43 @@ class WordlyAppliance(tk.Tk):
         self._close_panel()
         p = self._make_panel("🌐  Network Setup")
 
-        # Phase 1: Mac slaves off OS WiFi. Fields stored but inactive until Phase 2 (Pi).
-        tk.Label(p, text="PHASE 1 — Mac Mode",
-                 font=("Arial", 11, "bold"), bg=BTN_DARK, fg=AMBER).pack(anchor="w", pady=(0, 4))
-        tk.Label(p,
-                 text="Network connection is managed by macOS on this machine.\n"
-                      "WiFi credentials below are stored for Phase 2 Pi deployment only.",
-                 font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM,
-                 justify="left", wraplength=480).pack(anchor="w", pady=(0, 16))
+        # Live network status
+        net = get_network_status()
+        if net["connected"]:
+            status_txt  = f"✓  Connected"
+            status_col  = "#AAFFAA"
+            detail_txt  = f"IP: {net['ip']}"
+            if net["ssid"]:
+                detail_txt += f"  |  WiFi: {net['ssid']}"
+            elif net["interface"]:
+                detail_txt += f"  |  Interface: {net['interface']}"
+        else:
+            status_txt = "✗  No network connection"
+            status_col = AMBER
+            detail_txt = "Check cable or WiFi."
 
-        # SSID — stored but disabled
-        tk.Label(p, text="WiFi SSID  (Phase 2 / Pi only)", font=("Arial", 11),
+        tk.Label(p, text=status_txt, font=("Arial", 14, "bold"),
+                 bg=BTN_DARK, fg=status_col).pack(anchor="w", pady=(0, 2))
+        tk.Label(p, text=detail_txt, font=("Arial", 11),
+                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w", pady=(0, 16))
+
+        # SSID — stored for future nmcli use, currently informational
+        tk.Label(p, text="WiFi SSID  (stored for Pi config)", font=("Arial", 11),
                  bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
         ssid_var = tk.StringVar(value=self.cfg["wifi_ssid"])
-        ssid_entry = tk.Entry(p, textvariable=ssid_var, font=("Arial", 14),
-                 bg="#111E30", fg="#556688", insertbackground=TEXT_WHITE,
-                 relief="flat", width=30, state="disabled",
-                 disabledbackground="#111E30", disabledforeground="#445566")
-        ssid_entry.pack(fill="x", pady=(2, 12))
+        tk.Entry(p, textvariable=ssid_var, font=("Arial", 14),
+                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
+                 relief="flat", width=30).pack(fill="x", pady=(2, 12))
 
-        # Password — stored but disabled
-        tk.Label(p, text="WiFi Password  (Phase 2 / Pi only)", font=("Arial", 11),
+        # Password
+        tk.Label(p, text="WiFi Password  (stored for Pi config)", font=("Arial", 11),
                  bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
         pass_var = tk.StringVar(value=self.cfg["wifi_pass"])
-        pass_entry = tk.Entry(p, textvariable=pass_var, font=("Arial", 14),
-                 bg="#111E30", fg="#556688", insertbackground=TEXT_WHITE,
-                 relief="flat", show="•", width=30, state="disabled",
-                 disabledbackground="#111E30", disabledforeground="#445566")
-        pass_entry.pack(fill="x", pady=(2, 16))
+        tk.Entry(p, textvariable=pass_var, font=("Arial", 14),
+                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
+                 relief="flat", show="•", width=30).pack(fill="x", pady=(2, 16))
 
-        # Connection test — still useful on Mac
+        # Connection test
         tk.Label(p, text="CONNECTION TEST", font=("Arial", 11, "bold"),
                  bg=BTN_DARK, fg=TEXT_WHITE).pack(anchor="w", pady=(8, 4))
         test_result = tk.Label(p, text="Press button to test network + Wordly reachability.",
@@ -535,11 +598,17 @@ class WordlyAppliance(tk.Tk):
             ok  = not any(w in msg.lower() for w in ["cannot", "issue", "fail", "error", "lost"])
             test_result.config(text=msg, fg=TEXT_WHITE if ok else AMBER)
 
-        self._small_btn(p, "Test Connection", do_test).pack(anchor="w", pady=(0, 16))
+        self._small_btn(p, "Test Connection", do_test).pack(anchor="w", pady=(0, 8))
 
-        save_btn = tk.Label(p, text="✓  Close", font=("Arial", 13, "bold"),
+        def save_and_close():
+            self.cfg["wifi_ssid"] = ssid_var.get().strip()
+            self.cfg["wifi_pass"] = pass_var.get().strip()
+            self._close_panel()
+            self._build_idle()
+
+        save_btn = tk.Label(p, text="✓  Save & Close", font=("Arial", 13, "bold"),
                             bg="#1A4A2E", fg="#AAFFAA", padx=12, pady=14, cursor="hand2")
-        save_btn.bind("<Button-1>", lambda e: self._close_panel())
+        save_btn.bind("<Button-1>", lambda e: save_and_close())
         save_btn.bind("<Enter>",    lambda e: save_btn.config(bg="#256040"))
         save_btn.bind("<Leave>",    lambda e: save_btn.config(bg="#1A4A2E"))
         save_btn.pack(side="bottom", fill="x", pady=(16, 0))
