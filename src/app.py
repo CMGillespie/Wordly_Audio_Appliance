@@ -1,43 +1,23 @@
-# wordly_appliance/src/app.py
-# v0.13 — Wordly Audio Appliance
-# Phase 2: Pi hardware deployment
+# src/app.py
+# v1.0 — Wordly Audio Appliance — Flask/SocketIO server
+# Replaces Tkinter UI with browser-based UI served on localhost:5000
 # Change log:
-#   v0.1 — initial build
-#   v0.2 — full UX rewrite: idle/streaming/error states, setup panels,
-#           split workaround (stop+500ms+start), background diagnostics,
-#           mute toggle, timer, red/green full-screen states
-#   v0.3 — replace split workaround with WSS split command per Jim Firby (CTO)
-#   v0.4 — fix button text visibility, simplify network panel, add Quit button
-#   v0.5 — replace tk.Button with tk.Label for Mac color fidelity on all buttons
-#   v0.6 — fix WSS protocol: 'command'→'type', add connectionCode 9005 (GOTCHA #9),
-#           fix result field 'transcript'→'text', fix mute to use stop/start protocol
-#   v0.7 — remove live session ID trace formatter (Tkinter re-entry bug), normalize on save
-#   v0.8 — fix Save & Close visibility, remove duplicate transcript log line
-#   v0.9 — fix disconnect: add end:true, block until sent before teardown
-#   v0.10 — fix dialogs appearing under app on macOS: parent=self + after(100) delay
-#   v0.11 — add session-ended screen with 60s countdown (local end + portal end),
-#           add confirmation dialog on Quit
-#   v0.12 — Wordly Setup accepts join link (join.wordly.ai/join/ABCD-1234?key=X)
-#           and parses session ID + passcode automatically
-#   v0.13 — landscape layout (800x480), fullscreen mode, real network status panel,
-#           platform detection (Mac vs Pi)
+#   v1.0 — Flask + SocketIO rewrite. Python owns audio + WSS. Browser owns UI.
 
-import tkinter as tk
-from tkinter import ttk, messagebox
-import threading
-import asyncio
-import json
+import os
 import re
-import time
-import queue
+import json
 import socket
 import subprocess
-import sounddevice as sd
-import numpy as np
-import websockets
 import logging
-import os
 from datetime import datetime
+
+import sounddevice as sd
+from flask import Flask, render_template, request, jsonify
+from flask_socketio import SocketIO, emit
+
+from audio import AudioEngine, list_input_devices, SAMPLE_RATE
+from wss import WSSStreamer
 
 # ── LOGGING ───────────────────────────────────────────────────────────────────
 
@@ -52,48 +32,31 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── CONSTANTS ─────────────────────────────────────────────────────────────────
+# ── FLASK + SOCKETIO ──────────────────────────────────────────────────────────
 
-WSS_ENDPOINT  = "wss://endpoint.wordly.ai/present"
-SAMPLE_RATE   = 16000
-CHANNELS      = 1
-CHUNK_MS      = 100
-CHUNK_FRAMES  = int(SAMPLE_RATE * CHUNK_MS / 1000)
-# GOTCHA #8: split command confirmed by Jim Firby (CTO) — {"type":"split"} sent as text frame
-# No disconnect or delay required. Instant transcript boundary.
+app = Flask(__name__)
+app.config['SECRET_KEY'] = 'wordly-appliance-secret'
+sio = SocketIO(app, async_mode='eventlet', cors_allowed_origins='*')
 
-# GOTCHA #9: connectionCode is a Wordly-supplied identifier (currently '9005') that must
-# be included in every connect message. Appears in Wordly logs for support tracing.
-CONNECTION_CODE = '9005'
+# ── STATE ─────────────────────────────────────────────────────────────────────
 
-# ── COLORS ────────────────────────────────────────────────────────────────────
+state = {
+    "status":      "idle",   # idle|connecting|connected|streaming|muted|error|ended
+    "session_id":  "",
+    "passcode":    "",
+    "presenter":   "",
+    "device_idx":  None,
+    "device_name": "",
+    "wifi_ssid":   "",
+    "wifi_pass":   "",
+    "error_msg":   "",
+}
 
-WORDLY_BLUE    = "#1B3A6B"
-WORDLY_BLUE_LT = "#2A5298"
-ACCENT         = "#4A90D9"
-TEXT_WHITE     = "#F0F0F0"
-TEXT_DIM       = "#8899AA"
-BG_INPUT       = "#162d52"
-GREEN_BG       = "#1B5E20"
-GREEN_LIVE     = "#2E7D32"
-GREEN_MUTED    = "#4A7C59"
-GREEN_PULSE1   = "#3A6B47"
-GREEN_PULSE2   = "#2E5C3A"
-RED_BG         = "#7F0000"
-RED_DARK       = "#5C0000"
-AMBER          = "#FFC107"
-BTN_DARK       = "#1E3F6E"
-BTN_HOVER      = "#1B3A6B"
-BTN_SPLIT      = "#1A4A2E"
-BTN_END        = "#4A0000"
-BTN_MUTE       = "#3A5A3A"
-BTN_UNMUTE     = "#1A3A1A"
+audio_eng  = None
+wss        = None
+streaming  = False
 
-APP_W = 800
-APP_H = 480
-FULLSCREEN = os.uname().sysname == 'Linux'  # fullscreen on Pi, windowed on Mac
-
-# ── SESSION ID ────────────────────────────────────────────────────────────────
+# ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def normalize_session_id(raw: str) -> str:
     cleaned = raw.upper().replace(" ", "").replace("_", "")
@@ -101,1078 +64,310 @@ def normalize_session_id(raw: str) -> str:
         cleaned = cleaned[:4] + "-" + cleaned[4:]
     return cleaned if re.match(r'^[A-Z]{4}-\d{4}$', cleaned) else ""
 
-def format_session_input(raw: str) -> str:
-    cleaned = re.sub(r'[^A-Za-z0-9]', '', raw).upper()
-    if len(cleaned) > 4:
-        cleaned = cleaned[:4] + "-" + cleaned[4:8]
-    return cleaned
-
 def parse_join_link(raw: str):
-    """Parse a Wordly join link and return (session_id, passcode) or (None, None).
-    Accepts: https://join.wordly.ai/join/ABCD-1234?key=654321
-    """
     match = re.search(r'join\.wordly\.ai/join/([A-Za-z0-9]{4}-?[0-9]{4})', raw)
     if not match:
         return None, None
     session_id = normalize_session_id(match.group(1))
-    # Extract key= parameter
-    key_match = re.search(r'[?&]key=([^&\s]+)', raw)
-    passcode = key_match.group(1) if key_match else ""
+    key_match  = re.search(r'[?&]key=([^&\s]+)', raw)
+    passcode   = key_match.group(1) if key_match else ""
     return session_id, passcode
 
-# ── NETWORK DIAGNOSTICS ───────────────────────────────────────────────────────
-
 def get_network_status() -> dict:
-    """Returns current network info: interface, IP, SSID if WiFi."""
     info = {"ip": "", "interface": "", "ssid": "", "connected": False}
     try:
-        # Get default route interface
         result = subprocess.run(["ip", "route", "get", "8.8.8.8"],
                                  capture_output=True, text=True, timeout=3)
-        for part in result.stdout.split():
-            if part == "dev":
-                info["interface"] = result.stdout.split()[result.stdout.split().index("dev") + 1]
-                break
-        # Get IP
+        parts = result.stdout.split()
+        if "dev" in parts:
+            info["interface"] = parts[parts.index("dev") + 1]
         ip_result = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=2)
         ips = ip_result.stdout.strip().split()
         if ips:
-            info["ip"] = ips[0]
+            info["ip"]        = ips[0]
             info["connected"] = True
-        # Get SSID if WiFi
         if info["interface"].startswith("wl"):
-            ssid_result = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=2)
+            ssid_result = subprocess.run(["iwgetid", "-r"],
+                                          capture_output=True, text=True, timeout=2)
             info["ssid"] = ssid_result.stdout.strip()
     except Exception:
         pass
-    # Mac fallback
     if not info["ip"]:
         try:
-            info["ip"] = socket.gethostbyname(socket.gethostname())
+            info["ip"]        = socket.gethostbyname(socket.gethostname())
             info["connected"] = bool(info["ip"])
         except Exception:
             pass
     return info
 
 def diagnose_connection() -> str:
-    """Returns a plain-English best-guess error message."""
-    # 1. Check gateway reachability
     try:
-        gw = _get_default_gateway()
-        if gw:
-            result = subprocess.run(["ping", "-c", "1", "-W", "1000", gw],
-                                     capture_output=True, timeout=3)
-            if result.returncode != 0:
-                return f"Network issue — cannot reach gateway ({gw}). Check cable or WiFi."
+        result = subprocess.run(["ping", "-c", "1", "-W", "1000", "8.8.8.8"],
+                                 capture_output=True, timeout=3)
+        if result.returncode != 0:
+            return "Network issue — cannot reach internet. Check cable or WiFi."
     except Exception:
-        return "Network issue — cannot determine gateway. Check connection."
-
-    # 2. DNS check
+        return "Network issue — cannot determine connectivity."
     try:
         socket.getaddrinfo("wordly.ai", 443, proto=socket.IPPROTO_TCP)
     except socket.gaierror:
-        return "DNS failure — network connected but cannot resolve wordly.ai. Check DNS or proxy."
-
-    # 3. TCP port check
+        return "DNS failure — network connected but cannot resolve wordly.ai."
     try:
         s = socket.create_connection(("endpoint.wordly.ai", 443), timeout=4)
         s.close()
     except Exception:
         return "Cannot reach Wordly servers — internet connected but wordly.ai is unreachable."
+    devs = list_input_devices()
+    if not devs:
+        return "No audio input device found — check USB audio interface connection."
+    return "All systems OK — network and Wordly reachable."
 
-    # 4. Audio device check
+def push_status(status: str, extra: dict = None):
+    """Push status update to all connected browser clients."""
+    state["status"] = status
+    payload = {"status": status, "peak": audio_eng.peak if audio_eng else 0.0}
+    if extra:
+        payload.update(extra)
+    sio.emit("status", payload)
+
+# ── AUDIO + WSS CALLBACKS ─────────────────────────────────────────────────────
+
+def on_audio_chunk(chunk: bytes):
+    if streaming and wss:
+        wss.send_audio(chunk)
+
+_peak_counter = 0
+def on_peak(peak: float):
+    global _peak_counter
+    _peak_counter += 1
+    if _peak_counter % 3 != 0:  # emit every 3rd chunk (~300ms)
+        return
+    sio.emit("peak", {"peak": round(peak, 4)})
+
+def on_wss_status(status: str):
+    if status == "connected":
+        push_status("connected")
+    elif status == "error":
+        msg = diagnose_connection()
+        state["error_msg"] = msg
+        push_status("error", {"message": msg})
+    elif status == "ended":
+        push_status("ended", {"reason": "portal"})
+        _stop_all()
+    elif status == "connecting":
+        push_status("connecting")
+
+def on_transcript(text: str):
+    sio.emit("transcript", {"text": text})
+
+def _stop_all():
+    global audio_eng, wss, streaming
+    streaming = False
+    if audio_eng:
+        audio_eng.stop()
+        audio_eng = None
+    if wss:
+        wss.disconnect()
+        wss = None
+
+# ── HTTP ROUTES ───────────────────────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/api/state')
+def api_state():
+    net = get_network_status()
+    return jsonify({
+        **state,
+        "devices":  list_input_devices(),
+        "network":  net,
+    })
+
+@app.route('/api/config', methods=['POST'])
+def api_config():
+    data = request.json or {}
+
+    # Handle join link or raw session ID
+    raw = data.get("session_id", "").strip()
+    sid, key = parse_join_link(raw)
+    if sid:
+        state["session_id"] = sid
+        if key and not data.get("passcode", "").strip():
+            state["passcode"] = key
+        else:
+            state["passcode"] = data.get("passcode", state["passcode"]).strip()
+    else:
+        sid = normalize_session_id(raw)
+        if not sid:
+            return jsonify({"ok": False, "error": "Invalid session ID format. Use ABCD-1234 or paste a join link."}), 400
+        state["session_id"] = sid
+        state["passcode"]   = data.get("passcode", "").strip()
+
+    if not state["passcode"]:
+        return jsonify({"ok": False, "error": "Passcode is required."}), 400
+
+    state["presenter"]   = data.get("presenter", "").strip()
+    state["device_idx"]  = data.get("device_idx")
+    state["device_name"] = data.get("device_name", "")
+
+    if state["device_idx"] is None:
+        return jsonify({"ok": False, "error": "No audio device selected."}), 400
+
+    log.info(f"Config saved: session={state['session_id']} device={state['device_name']}")
+    return jsonify({"ok": True})
+
+@app.route('/api/network', methods=['POST'])
+def api_network():
+    data = request.json or {}
+    state["wifi_ssid"] = data.get("ssid", "").strip()
+    state["wifi_pass"] = data.get("password", "").strip()
+    return jsonify({"ok": True})
+
+@app.route('/api/network/status')
+def api_network_status():
+    return jsonify(get_network_status())
+
+@app.route('/api/network/test')
+def api_network_test():
+    msg = diagnose_connection()
+    ok  = "OK" in msg
+    return jsonify({"ok": ok, "message": msg})
+
+@app.route('/api/devices')
+def api_devices():
+    return jsonify(list_input_devices())
+
+@app.route('/api/audio/test')
+def api_audio_test():
+    idx = request.args.get('device', type=int)
+    if idx is None:
+        return jsonify({"ok": False, "message": "No device specified."})
     try:
-        devs = [d for d in sd.query_devices() if d['max_input_channels'] > 0]
-        if not devs:
-            return "No audio input device found — check USB audio interface connection."
-    except Exception:
-        return "Audio system error — cannot enumerate devices."
+        import numpy as np
+        rec  = sd.rec(int(2 * SAMPLE_RATE), samplerate=SAMPLE_RATE,
+                      channels=1, dtype='int16', device=idx)
+        sd.wait()
+        peak = float(np.abs(rec).max()) / 32767.0
+        db   = 20 * __import__('math').log10(peak) if peak > 1e-6 else -99
+        if peak < 0.001:
+            return jsonify({"ok": False, "message": "No signal detected — check mic/cable."})
+        return jsonify({"ok": True, "message": f"Signal OK: {db:.1f} dBFS"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)})
 
-    return "Connection lost — Wordly WSS dropped. Attempting to reconnect..."
+@app.route('/api/quit', methods=['POST'])
+def api_quit():
+    import threading
+    def _quit():
+        import time, os, signal
+        time.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+    threading.Thread(target=_quit, daemon=True).start()
+    return jsonify({"ok": True})
 
-def _get_default_gateway() -> str:
-    try:
-        result = subprocess.run(["route", "-n", "get", "default"],
-                                 capture_output=True, text=True, timeout=2)
-        for line in result.stdout.splitlines():
-            if "gateway" in line.lower():
-                return line.split()[-1]
-    except Exception:
-        pass
-    return "8.8.8.8"  # fallback ping target
+# ── SOCKETIO EVENTS ───────────────────────────────────────────────────────────
 
-# ── AUDIO ENGINE ──────────────────────────────────────────────────────────────
+@sio.on('connect')
+def on_connect():
+    log.info("Browser connected")
+    net = get_network_status()
+    emit("status", {
+        "status":  state["status"],
+        "peak":    0.0,
+        "network": net,
+    })
 
-class AudioEngine:
-    def __init__(self, device_index: int, on_chunk):
-        self.device_index = device_index
-        self.on_chunk = on_chunk
-        self.stream = None
-        self.running = False
-        self.peak = 0.0
+@sio.on('start')
+def on_start():
+    global audio_eng, wss, streaming
+    if not state["session_id"] or not state["passcode"] or state["device_idx"] is None:
+        emit("error", {"message": "Not configured. Set session ID and audio device first."})
+        return
 
-    def start(self):
-        self.running = True
-        self.stream = sd.InputStream(
-            device=self.device_index,
-            samplerate=SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype='int16',
-            blocksize=CHUNK_FRAMES,
-            callback=self._cb
-        )
-        self.stream.start()
-        log.info(f"Audio started — device {self.device_index} @ {SAMPLE_RATE}Hz mono 16-bit")
+    log.info(f"Starting — session={state['session_id']} device={state['device_idx']}")
 
-    def stop(self):
-        self.running = False
-        if self.stream:
-            self.stream.stop()
-            self.stream.close()
-            self.stream = None
+    wss = WSSStreamer(
+        session_id    = state["session_id"],
+        passcode      = state["passcode"],
+        name          = state["presenter"],
+        on_status     = on_wss_status,
+        on_transcript = on_transcript,
+    )
+    wss.start()
 
-    def _cb(self, indata, frames, time_info, status):
-        if status:
-            log.warning(f"Audio: {status}")
-        if self.running:
-            self.peak = float(np.abs(indata).max()) / 32767.0
-            self.on_chunk(indata.copy().tobytes())
+    audio_eng = AudioEngine(
+        device_index = state["device_idx"],
+        on_chunk     = on_audio_chunk,
+        on_peak      = on_peak,
+    )
+    audio_eng.start()
+    streaming = True
+    push_status("streaming")
 
-# ── WSS STREAMER ──────────────────────────────────────────────────────────────
+@sio.on('mute')
+def on_mute():
+    if wss:
+        wss.send_control({"type": "stop"})
+    push_status("muted")
 
-class WSSStreamer:
-    def __init__(self, session_id, passcode, on_status, on_transcript, name=""):
-        self.session_id  = session_id
-        self.passcode    = passcode
-        self.name        = name
-        self.on_status   = on_status
-        self.on_transcript = on_transcript
-        self.ws          = None
-        self.running     = False
-        self.connected   = False
-        self.audio_q     = queue.Queue()
-        self.loop        = None
-        self._thread     = None
-        self.context     = None
+@sio.on('unmute')
+def on_unmute():
+    if wss:
+        wss.send_control({"type": "start", "languageCode": "en", "sampleRate": SAMPLE_RATE})
+    push_status("streaming")
 
-    def start(self):
-        self.running = True
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
+@sio.on('split')
+def on_split():
+    if wss:
+        wss.send_split()
+    emit("split_ack", {})
 
-    def send_audio(self, chunk: bytes):
-        if self.connected:
-            self.audio_q.put(chunk)
+@sio.on('end')
+def on_end():
+    _stop_all()
+    push_status("ended", {"reason": "local"})
 
-    def send_split(self):
-        """Transcript boundary. GOTCHA #8 — confirmed by Jim Firby (CTO).
-        Sends {"type":"split"} as a text frame. No disconnect needed."""
-        self.send_control({"type": "split"})
-        log.info("WSS split sent — transcript boundary created")
-
-    def send_control(self, msg: dict):
-        """Send any JSON control message on the live WSS connection."""
-        async def _send():
-            if self.ws and self.connected:
-                await self.ws.send(json.dumps(msg))
-                log.info(f"Control sent: {msg}")
-        if self.loop:
-            asyncio.run_coroutine_threadsafe(_send(), self.loop)
-
-    def stop(self):
-        self.running = False
-        self.connected = False
-        self.audio_q.put(None)
-
-    def _run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_until_complete(self._connect_loop())
-
-    async def _connect_loop(self):
-        backoff = 2
-        while self.running:
-            try:
-                self.on_status("connecting")
-                async with websockets.connect(WSS_ENDPOINT) as ws:
-                    self.ws = ws
-                    backoff = 2
-                    await self._handshake()
-                    await self._stream_loop()
-            except Exception as e:
-                if not self.running:
-                    break
-                log.warning(f"WSS error: {e} — retry in {backoff}s")
-                self.connected = False
-                self.on_status("error")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * 2, 30)
-
-    async def _handshake(self):
-        # GOTCHA #9: use 'type' not 'command'. Include connectionCode in every connect.
-        connect_msg = {
-            "type": "connect",
-            "presentationCode": self.session_id,
-            "accessKey": self.passcode,
-            "connectionCode": CONNECTION_CODE,
-        }
-        if self.name:
-            connect_msg["name"] = self.name
-        if self.context:
-            connect_msg["context"] = self.context
-        await self.ws.send(json.dumps(connect_msg))
-        log.info(f"Sent connect: presentationCode={self.session_id}")
-
-        resp = json.loads(await asyncio.wait_for(self.ws.recv(), timeout=10))
-        log.info(f"Connect response: {resp}")
-        if not resp.get("success", False):
-            raise Exception(f"Rejected: {resp.get('message', 'unknown')}")
-
-        await self.ws.send(json.dumps({
-            "type": "start",
-            "languageCode": "en",
-            "sampleRate": SAMPLE_RATE
-        }))
-        self.connected = True
-        self.on_status("connected")
-        log.info("WSS handshake complete — streaming active")
-
-    async def _stream_loop(self):
-        r = asyncio.create_task(self._recv())
-        s = asyncio.create_task(self._send())
-        done, pending = await asyncio.wait([r, s], return_when=asyncio.FIRST_COMPLETED)
-        for t in pending:
-            t.cancel()
-
-    async def _send(self):
-        loop = asyncio.get_event_loop()
-        while self.running and self.connected:
-            chunk = await loop.run_in_executor(None, self._get_chunk)
-            if chunk is None:
-                break
-            if chunk and self.ws and self.connected:
-                await self.ws.send(chunk)
-
-    def _get_chunk(self):
-        try:
-            return self.audio_q.get(timeout=1.0)
-        except queue.Empty:
-            return b""
-
-    async def _recv(self):
-        async for msg in self.ws:
-            if isinstance(msg, str):
+@sio.on('leave')
+def on_leave():
+    """Disconnect WSS without ending session for attendees (end=false)."""
+    global audio_eng, wss, streaming
+    streaming = False
+    if audio_eng:
+        audio_eng.stop()
+        audio_eng = None
+    if wss:
+        # Override disconnect to send end=false
+        import asyncio, json as _json
+        async def _leave():
+            if wss.ws and wss.connected:
                 try:
-                    data = json.loads(msg)
-                    msg_type = data.get("type", "")
-                    if msg_type == "result":
-                        self.context = data.get("context")
-                        t = data.get("text", "")
-                        if t and data.get("final", False):
-                            self.on_transcript(t)
-                    elif msg_type == "status":
-                        log.info(f"Status update: {data}")
-                    elif msg_type == "error":
-                        log.warning(f"Server error: {data.get('message')}")
-                    elif msg_type == "end":
-                        log.info("Session ended by server")
-                        self.on_status("ended")
+                    await wss.ws.send(_json.dumps({"type": "stop"}))
+                    await asyncio.sleep(0.2)
+                    await wss.ws.send(_json.dumps({"type": "disconnect", "end": False}))
+                    await asyncio.sleep(0.2)
+                    log.info("WSS leave sent — session continues for attendees")
                 except Exception as e:
-                    log.warning(f"Recv error: {e}")
-
-    async def _disconnect(self):
-        if self.ws and self.connected:
+                    log.warning(f"Leave error: {e}")
+        if wss.loop:
+            future = asyncio.run_coroutine_threadsafe(_leave(), wss.loop)
             try:
-                await self.ws.send(json.dumps({"type": "stop"}))
-                await asyncio.sleep(0.2)  # let stop process
-                await self.ws.send(json.dumps({"type": "disconnect", "end": True}))
-                await asyncio.sleep(0.3)  # let disconnect send before teardown
-                log.info("WSS disconnect sent cleanly")
-            except Exception as e:
-                log.warning(f"Disconnect error: {e}")
-
-    def disconnect(self):
-        if self.loop and self.connected:
-            future = asyncio.run_coroutine_threadsafe(self._disconnect(), self.loop)
-            try:
-                future.result(timeout=2.0)  # wait up to 2s for clean disconnect
-            except Exception as e:
-                log.warning(f"Disconnect wait error: {e}")
-        self.stop()
-
-# ── MAIN APP ──────────────────────────────────────────────────────────────────
-
-class WordlyAppliance(tk.Tk):
-
-    # App state machine:
-    # idle → connecting → streaming ↔ muted
-    #                  ↘ error → (auto-retry) → streaming
-    # streaming → ended → idle
-
-    def __init__(self):
-        super().__init__()
-        self.title("Wordly Audio Appliance")
-        self.geometry(f"{APP_W}x{APP_H}")
-        self.resizable(False, False)
-        self.configure(bg=WORDLY_BLUE)
-        if FULLSCREEN:
-            self.attributes("-fullscreen", True)
-
-        # Config state
-        self.cfg = {
-            "session_id":  "",
-            "passcode":    "",
-            "presenter":   "",
-            "device_idx":  None,
-            "device_name": "",
-            "wifi_ssid":   "",
-            "wifi_pass":   "",
-        }
-
-        # Runtime state
-        self.state       = "idle"   # idle|connecting|streaming|muted|error
-        self.audio_eng   = None
-        self.wss         = None
-        self.muted       = False
-        self.timer_start = None
-        self.timer_id    = None
-        self.pulse_id    = None
-        self.pulse_state = False
-        self.error_msg   = ""
-
-        # Panels (setup overlays)
-        self.panel       = None
-
-        self._build_idle()
-        self.protocol("WM_DELETE_WINDOW", self._on_quit)
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # IDLE SCREEN
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _build_idle(self):
-        self._clear()
-        self.configure(bg=WORDLY_BLUE)
-        self.state = "idle"
-
-        # ── Landscape layout: left panel (info) + right panel (start button) ──
-        main = tk.Frame(self, bg=WORDLY_BLUE)
-        main.pack(fill="both", expand=True, padx=0, pady=0)
-
-        # Left column — branding + session info
-        left = tk.Frame(main, bg=WORDLY_BLUE, width=420)
-        left.pack(side="left", fill="both", expand=True, padx=(20, 10), pady=16)
-        left.pack_propagate(False)
-
-        # Branding
-        hdr = tk.Frame(left, bg=WORDLY_BLUE)
-        hdr.pack(fill="x", pady=(0, 10))
-        tk.Label(hdr, text="WORDLY", font=("Arial", 26, "bold"),
-                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(side="left")
-        tk.Label(hdr, text="  Audio Appliance", font=("Arial", 13),
-                 bg=WORDLY_BLUE, fg=ACCENT).pack(side="left")
-
-        # Session card
-        card = tk.Frame(left, bg=WORDLY_BLUE_LT, padx=16, pady=12)
-        card.pack(fill="x")
-
-        if self.cfg["session_id"]:
-            tk.Label(card, text=self.cfg["session_id"],
-                     font=("Courier", 24, "bold"), bg=WORDLY_BLUE_LT, fg=TEXT_WHITE).pack(anchor="w")
-            if self.cfg["presenter"]:
-                tk.Label(card, text=self.cfg["presenter"],
-                         font=("Arial", 13), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w")
-            dev = self.cfg["device_name"] or "No audio device selected"
-            tk.Label(card, text=f"🎙  {dev}",
-                     font=("Arial", 11), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w", pady=(4, 0))
-        else:
-            tk.Label(card, text="Not configured", font=("Arial", 16),
-                     bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w")
-            tk.Label(card, text="Use Wordly Setup to enter session details.",
-                     font=("Arial", 11), bg=WORDLY_BLUE_LT, fg=TEXT_DIM).pack(anchor="w", pady=(4, 0))
-
-        # Network status — live from system
-        net = get_network_status()
-        if net["ssid"]:
-            net_txt = f"🌐  {net['ssid']}  ({net['ip']})"
-        elif net["ip"]:
-            net_txt = f"🌐  Wired  ({net['ip']})"
-        else:
-            net_txt = "🌐  No network connection"
-        tk.Label(left, text=net_txt, font=("Arial", 11),
-                 bg=WORDLY_BLUE, fg=TEXT_DIM).pack(anchor="w", pady=(8, 0))
-
-        # Bottom buttons
-        bot = tk.Frame(left, bg=WORDLY_BLUE)
-        bot.pack(side="bottom", fill="x", pady=(0, 0))
-        self._small_btn(bot, "🌐  Network", self._open_network_setup).pack(
-            side="left", expand=True, fill="x", padx=(0, 6))
-        self._small_btn(bot, "🎙  Wordly Setup", self._open_wordly_setup).pack(
-            side="left", expand=True, fill="x", padx=(0, 6))
-        self._small_btn(bot, "✕  Quit", self._on_quit, bg="#3A1A1A").pack(
-            side="left", fill="x")
-
-        # Right column — START button
-        right = tk.Frame(main, bg=WORDLY_BLUE, width=360)
-        right.pack(side="right", fill="both", padx=(10, 20), pady=16)
-        right.pack_propagate(False)
-
-        ready = bool(self.cfg["session_id"] and self.cfg["passcode"] and self.cfg["device_idx"] is not None)
-        start_color = ACCENT if ready else "#334466"
-        start_fg    = TEXT_WHITE if ready else "#556688"
-
-        self.start_btn = tk.Label(
-            right, text="START\nSESSION",
-            font=("Arial", 24, "bold"),
-            bg=start_color, fg=start_fg,
-            cursor="hand2" if ready else "arrow",
-            justify="center"
-        )
-        self.start_btn.pack(fill="both", expand=True)
-        if ready:
-            self.start_btn.bind("<Button-1>", lambda e: self._on_start())
-            self.start_btn.bind("<Enter>", lambda e: self.start_btn.config(bg=self._lighten(start_color)))
-            self.start_btn.bind("<Leave>", lambda e: self.start_btn.config(bg=start_color))
-
-        if not ready:
-            tk.Label(right, text="Configure\nsession first",
-                     font=("Arial", 10), bg=WORDLY_BLUE, fg=TEXT_DIM,
-                     justify="center").pack(pady=(4, 0))
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # SETUP PANELS (slide over idle screen)
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _open_network_setup(self):
-        self._close_panel()
-        p = self._make_panel("🌐  Network Setup")
-
-        # Live network status
-        net = get_network_status()
-        if net["connected"]:
-            status_txt  = f"✓  Connected"
-            status_col  = "#AAFFAA"
-            detail_txt  = f"IP: {net['ip']}"
-            if net["ssid"]:
-                detail_txt += f"  |  WiFi: {net['ssid']}"
-            elif net["interface"]:
-                detail_txt += f"  |  Interface: {net['interface']}"
-        else:
-            status_txt = "✗  No network connection"
-            status_col = AMBER
-            detail_txt = "Check cable or WiFi."
-
-        tk.Label(p, text=status_txt, font=("Arial", 14, "bold"),
-                 bg=BTN_DARK, fg=status_col).pack(anchor="w", pady=(0, 2))
-        tk.Label(p, text=detail_txt, font=("Arial", 11),
-                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w", pady=(0, 16))
-
-        # SSID — stored for future nmcli use, currently informational
-        tk.Label(p, text="WiFi SSID  (stored for Pi config)", font=("Arial", 11),
-                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        ssid_var = tk.StringVar(value=self.cfg["wifi_ssid"])
-        tk.Entry(p, textvariable=ssid_var, font=("Arial", 14),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", width=30).pack(fill="x", pady=(2, 12))
-
-        # Password
-        tk.Label(p, text="WiFi Password  (stored for Pi config)", font=("Arial", 11),
-                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        pass_var = tk.StringVar(value=self.cfg["wifi_pass"])
-        tk.Entry(p, textvariable=pass_var, font=("Arial", 14),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", show="•", width=30).pack(fill="x", pady=(2, 16))
-
-        # Connection test
-        tk.Label(p, text="CONNECTION TEST", font=("Arial", 11, "bold"),
-                 bg=BTN_DARK, fg=TEXT_WHITE).pack(anchor="w", pady=(8, 4))
-        test_result = tk.Label(p, text="Press button to test network + Wordly reachability.",
-                                font=("Arial", 12), bg=BTN_DARK, fg=TEXT_DIM,
-                                wraplength=480, justify="left")
-        test_result.pack(anchor="w", pady=(0, 8))
-
-        def do_test():
-            test_result.config(text="Testing...", fg=AMBER)
-            p.update()
-            msg = diagnose_connection()
-            ok  = not any(w in msg.lower() for w in ["cannot", "issue", "fail", "error", "lost"])
-            test_result.config(text=msg, fg=TEXT_WHITE if ok else AMBER)
-
-        self._small_btn(p, "Test Connection", do_test).pack(anchor="w", pady=(0, 8))
-
-        def save_and_close():
-            self.cfg["wifi_ssid"] = ssid_var.get().strip()
-            self.cfg["wifi_pass"] = pass_var.get().strip()
-            self._close_panel()
-            self._build_idle()
-
-        save_btn = tk.Label(p, text="✓  Save & Close", font=("Arial", 13, "bold"),
-                            bg="#1A4A2E", fg="#AAFFAA", padx=12, pady=14, cursor="hand2")
-        save_btn.bind("<Button-1>", lambda e: save_and_close())
-        save_btn.bind("<Enter>",    lambda e: save_btn.config(bg="#256040"))
-        save_btn.bind("<Leave>",    lambda e: save_btn.config(bg="#1A4A2E"))
-        save_btn.pack(side="bottom", fill="x", pady=(16, 0))
-
-    def _open_wordly_setup(self):
-        self._close_panel()
-        p = self._make_panel("🎙  Wordly Setup")
-
-        # Session ID
-        tk.Label(p, text="Session ID", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        # ── Join link or Session ID ──
-        tk.Label(p, text="Session ID  or  Join Link",
-                 font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        link_var = tk.StringVar(value=self.cfg.get("_raw_link", self.cfg["session_id"]))
-        link_entry = tk.Entry(p, textvariable=link_var, font=("Arial", 12),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", width=42)
-        link_entry.pack(fill="x", pady=(2, 2))
-
-        parse_hint = tk.Label(p, text="Paste a join link or type ABCD-1234 directly.",
-                 font=("Arial", 10), bg=BTN_DARK, fg=TEXT_DIM)
-        parse_hint.pack(anchor="w", pady=(0, 8))
-
-        sid_var = tk.StringVar(value=self.cfg["session_id"])
-        pc_var  = tk.StringVar(value=self.cfg["passcode"])
-
-        def on_link_change(*_):
-            raw = link_var.get().strip()
-            sid, key = parse_join_link(raw)
-            if sid:
-                sid_var.set(sid)
-                if key:
-                    pc_var.set(key)
-                parse_hint.config(
-                    text=f"✓ Parsed: {sid}  |  passcode {'set' if key else 'not found in link'}",
-                    fg="#AAFFAA")
-            else:
-                parse_hint.config(
-                    text="Paste a join link or type ABCD-1234 directly.",
-                    fg=TEXT_DIM)
-
-        link_var.trace_add("write", on_link_change)
-
-        # Session ID (read-only display when parsed from link, editable otherwise)
-        tk.Label(p, text="Session ID", font=("Arial", 11),
-                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        tk.Entry(p, textvariable=sid_var, font=("Courier", 16, "bold"),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", width=12, justify="center").pack(pady=(2, 8))
-
-        # Passcode
-        tk.Label(p, text="Passcode", font=("Arial", 11), bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        tk.Entry(p, textvariable=pc_var, font=("Arial", 14),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", show="•", width=24).pack(fill="x", pady=(2, 12))
-
-        # Presenter
-        tk.Label(p, text="Presenter / Speaker Name", font=("Arial", 11),
-                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        pres_var = tk.StringVar(value=self.cfg["presenter"])
-        tk.Entry(p, textvariable=pres_var, font=("Arial", 14),
-                 bg=BG_INPUT, fg=TEXT_WHITE, insertbackground=TEXT_WHITE,
-                 relief="flat", width=30).pack(fill="x", pady=(2, 12))
-
-        # Audio device
-        tk.Label(p, text="Audio Input Device", font=("Arial", 11),
-                 bg=BTN_DARK, fg=TEXT_DIM).pack(anchor="w")
-        devices = [(i, d['name']) for i, d in enumerate(sd.query_devices())
-                   if d['max_input_channels'] > 0]
-        dev_names = [f"{i}: {n}" for i, n in devices] or ["No input devices found"]
-        dev_var = tk.StringVar()
-        # Pre-select current if set
-        if self.cfg["device_idx"] is not None:
-            match = [x for x in dev_names if x.startswith(str(self.cfg["device_idx"]) + ":")]
-            if match:
-                dev_var.set(match[0])
-        if not dev_var.get():
-            dev_var.set(dev_names[0])
-
-        ttk.Combobox(p, textvariable=dev_var, values=dev_names,
-                     state="readonly", font=("Arial", 12), width=36).pack(pady=(2, 8))
-
-        # Audio test
-        test_lbl = tk.Label(p, text="", font=("Arial", 11), bg=BTN_DARK, fg=AMBER)
-        test_lbl.pack(anchor="w", pady=(0, 8))
-
-        def do_audio_test():
-            sel = dev_var.get()
-            if "No input" in sel:
-                test_lbl.config(text="No device to test.", fg=RED_BG)
-                return
-            idx = int(sel.split(":")[0])
-            test_lbl.config(text="Recording 2s...", fg=AMBER)
-            p.update()
-            try:
-                rec = sd.rec(int(2 * SAMPLE_RATE), samplerate=SAMPLE_RATE,
-                              channels=1, dtype='int16', device=idx)
-                sd.wait()
-                peak = float(np.abs(rec).max()) / 32767.0
-                db   = 20 * np.log10(peak) if peak > 1e-6 else -99
-                if peak < 0.001:
-                    test_lbl.config(text="⚠  No signal detected. Check mic/cable.", fg=AMBER)
-                else:
-                    test_lbl.config(text=f"✓  Signal detected: {db:.1f} dBFS", fg="#66FF66")
-            except Exception as e:
-                test_lbl.config(text=f"Error: {e}", fg=RED_BG)
-
-        self._small_btn(p, "Test Audio (2s)", do_audio_test).pack(anchor="w", pady=(0, 8))
-
-        def save():
-            # Try link parse first, fall back to direct session ID field
-            raw_link = link_var.get().strip()
-            parsed_sid, parsed_key = parse_join_link(raw_link)
-            if parsed_sid:
-                sid = parsed_sid
-                if parsed_key and not pc_var.get().strip():
-                    pc_var.set(parsed_key)
-            else:
-                sid = normalize_session_id(sid_var.get())
-            if not sid:
-                messagebox.showerror("Invalid Session ID",
-                    "Enter a valid session ID (ABCD-1234) or paste a Wordly join link.", parent=p)
-                return
-            if not pc_var.get().strip():
-                messagebox.showerror("Missing Passcode", "Passcode is required.", parent=p)
-                return
-            sel = dev_var.get()
-            if "No input" in sel:
-                messagebox.showerror("No Device", "Select a valid audio input device.", parent=p)
-                return
-            idx = int(sel.split(":")[0])
-            dev_name = sel.split(":", 1)[1].strip()
-            self.cfg.update({
-                "session_id":  sid,
-                "passcode":    pc_var.get().strip(),
-                "presenter":   pres_var.get().strip(),
-                "device_idx":  idx,
-                "device_name": dev_name,
-                "_raw_link":   raw_link,
-            })
-            self._close_panel()
-            self._build_idle()
-
-        save_btn = tk.Label(p, text="✓  Save & Close", font=("Arial", 13, "bold"),
-                            bg="#1A4A2E", fg="#AAFFAA", padx=12, pady=14, cursor="hand2")
-        save_btn.bind("<Button-1>", lambda e: save())
-        save_btn.bind("<Enter>",    lambda e: save_btn.config(bg="#256040"))
-        save_btn.bind("<Leave>",    lambda e: save_btn.config(bg="#1A4A2E"))
-        save_btn.pack(side="bottom", fill="x", pady=(16, 0))
-
-    def _make_panel(self, title: str) -> tk.Frame:
-        """Creates a full-screen overlay panel on top of idle screen."""
-        self.panel = tk.Frame(self, bg=BTN_DARK)
-        self.panel.place(x=0, y=0, width=APP_W, height=APP_H)
-
-        hdr = tk.Frame(self.panel, bg=WORDLY_BLUE, height=60)
-        hdr.pack(fill="x")
-        hdr.pack_propagate(False)
-        tk.Label(hdr, text=title, font=("Arial", 16, "bold"),
-                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(side="left", padx=20, pady=12)
-        tk.Button(hdr, text="✕  Close", font=("Arial", 12),
-                  bg=WORDLY_BLUE, fg=TEXT_DIM, relief="flat",
-                  cursor="hand2", command=self._close_panel).pack(side="right", padx=20)
-
-        body = tk.Frame(self.panel, bg=BTN_DARK, padx=30, pady=20)
-        body.pack(fill="both", expand=True)
-        return body
-
-    def _close_panel(self):
-        if self.panel:
-            self.panel.destroy()
-            self.panel = None
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # STREAMING SCREEN  (full green)
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _build_streaming(self):
-        self._clear()
-        self.configure(bg=GREEN_LIVE)
-        self.state = "streaming"
-
-        # Top info bar
-        top = tk.Frame(self, bg=GREEN_BG, padx=20, pady=10)
-        top.pack(fill="x")
-        tk.Label(top, text=self.cfg["session_id"],
-                 font=("Courier", 16, "bold"), bg=GREEN_BG, fg=TEXT_WHITE).pack(side="left")
-        if self.cfg["presenter"]:
-            tk.Label(top, text=f"  ·  {self.cfg['presenter']}",
-                     font=("Arial", 14), bg=GREEN_BG, fg="#AADDAA").pack(side="left")
-
-        # Big status label
-        self.status_lbl = tk.Label(self, text="● LIVE",
-                                    font=("Arial", 48, "bold"),
-                                    bg=GREEN_LIVE, fg=TEXT_WHITE)
-        self.status_lbl.pack(pady=(50, 10))
-
-        # Timer
-        self.timer_lbl = tk.Label(self, text="00:00:00",
-                                   font=("Courier", 36),
-                                   bg=GREEN_LIVE, fg="#CCFFCC")
-        self.timer_lbl.pack()
-
-        # Audio meter
-        meter_frame = tk.Frame(self, bg=GREEN_LIVE, pady=10)
-        meter_frame.pack(fill="x", padx=60)
-        tk.Label(meter_frame, text="AUDIO", font=("Arial", 10),
-                 bg=GREEN_LIVE, fg="#AADDAA").pack(anchor="w")
-        self.meter_bar = ttk.Progressbar(meter_frame, orient="horizontal",
-                                          length=480, mode="determinate", maximum=100)
-        self.meter_bar.pack(fill="x")
-
-        # Mute button (big center)
-        self.mute_btn = tk.Label(self, text="MUTE",
-                                  font=("Arial", 20, "bold"),
-                                  bg=BTN_MUTE, fg=TEXT_WHITE,
-                                  padx=40, pady=16, cursor="hand2")
-        self.mute_btn.bind("<Button-1>", lambda e: self._on_mute())
-        self.mute_btn.bind("<Enter>", lambda e: self.mute_btn.config(bg=self._lighten(BTN_MUTE)))
-        self.mute_btn.bind("<Leave>", lambda e: self.mute_btn.config(bg=BTN_MUTE if self.state=="streaming" else BTN_UNMUTE))
-        self.mute_btn.pack(pady=(30, 0))
-
-        # Bottom: Split + End
-        bot = tk.Frame(self, bg=GREEN_LIVE)
-        bot.pack(side="bottom", fill="x", padx=30, pady=24)
-
-        self._small_btn(bot, "✂  Split Session", self._on_split,
-                         bg=BTN_SPLIT, fg=TEXT_WHITE).pack(side="left", expand=True, fill="x", padx=(0, 10))
-        self._small_btn(bot, "■  End Session", self._on_end,
-                         bg=BTN_END, fg=TEXT_WHITE).pack(side="left", expand=True, fill="x")
-
-        # Start timer and meter
-        self.timer_start = time.time()
-        self._tick_timer()
-        self._tick_meter()
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # ERROR SCREEN  (full red)
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _build_ended(self, reason: str = "local"):
-        """Session ended screen — shown on both local end and portal-initiated end."""
-        self._stop_all()
-        self._clear()
-        self.configure(bg=WORDLY_BLUE)
-        self.state = "ended"
-
-        # Header
-        hdr = tk.Frame(self, bg=WORDLY_BLUE)
-        hdr.pack(fill="x", padx=30, pady=(30, 0))
-        tk.Label(hdr, text="WORDLY", font=("Arial", 36, "bold"),
-                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(side="left")
-        tk.Label(hdr, text="  Audio Appliance", font=("Arial", 18),
-                 bg=WORDLY_BLUE, fg=ACCENT).pack(side="left", pady=6)
-
-        # Session ID if available
-        if self.cfg["session_id"]:
-            tk.Label(self, text=self.cfg["session_id"],
-                     font=("Courier", 22, "bold"),
-                     bg=WORDLY_BLUE, fg=TEXT_DIM).pack(pady=(30, 0))
-
-        # Main message
-        tk.Label(self, text="Session Ended",
-                 font=("Arial", 36, "bold"),
-                 bg=WORDLY_BLUE, fg=TEXT_WHITE).pack(pady=(20, 0))
-
-        # Sub message — differs by reason
-        if reason == "portal":
-            sub = "This session was closed from the Wordly portal."
-        else:
-            sub = "Session ended successfully."
-        tk.Label(self, text=sub,
-                 font=("Arial", 16),
-                 bg=WORDLY_BLUE, fg=TEXT_DIM).pack(pady=(8, 0))
-
-        # Countdown label
-        self._countdown_val = 60
-        self._countdown_id  = None
-        self.countdown_lbl  = tk.Label(self,
-                 text=f"Returning to setup in {self._countdown_val}s...",
-                 font=("Arial", 13), bg=WORDLY_BLUE, fg=ACCENT)
-        self.countdown_lbl.pack(pady=(30, 0))
-
-        # Cancel countdown
-        cancel_btn = tk.Label(self, text="Stay on this screen",
-                              font=("Arial", 12), bg=WORDLY_BLUE_LT,
-                              fg=TEXT_DIM, padx=16, pady=8, cursor="hand2")
-        cancel_btn.bind("<Button-1>", lambda e: self._cancel_countdown())
-        cancel_btn.bind("<Enter>",    lambda e: cancel_btn.config(fg=TEXT_WHITE))
-        cancel_btn.bind("<Leave>",    lambda e: cancel_btn.config(fg=TEXT_DIM))
-        cancel_btn.pack(pady=(12, 0))
-
-        # Start session now button
-        start_now = tk.Label(self, text="START SESSION NOW →",
-                             font=("Arial", 18, "bold"),
-                             bg=ACCENT, fg=TEXT_WHITE,
-                             padx=20, pady=18, cursor="hand2")
-        start_now.bind("<Button-1>", lambda e: self._from_ended_to_idle())
-        start_now.bind("<Enter>",    lambda e: start_now.config(bg=self._lighten(ACCENT)))
-        start_now.bind("<Leave>",    lambda e: start_now.config(bg=ACCENT))
-        start_now.pack(fill="x", padx=30, pady=(40, 0))
-
-        # Start countdown
-        self._tick_countdown()
-
-    def _tick_countdown(self):
-        if self.state != "ended":
-            return
-        if self._countdown_val <= 0:
-            self._from_ended_to_idle()
-            return
-        if hasattr(self, 'countdown_lbl'):
-            self.countdown_lbl.config(
-                text=f"Returning to setup in {self._countdown_val}s...")
-        self._countdown_val -= 1
-        self._countdown_id = self.after(1000, self._tick_countdown)
-
-    def _cancel_countdown(self):
-        if self._countdown_id:
-            self.after_cancel(self._countdown_id)
-            self._countdown_id = None
-        if hasattr(self, 'countdown_lbl'):
-            self.countdown_lbl.config(text="Countdown cancelled — press button when ready.")
-
-    def _from_ended_to_idle(self):
-        if self._countdown_id:
-            self.after_cancel(self._countdown_id)
-            self._countdown_id = None
-        self.state = "idle"
-        self._build_idle()
-
-    def _build_error(self, msg: str):
-        self._clear()
-        self.configure(bg=RED_BG)
-        self.state = "error"
-
-        tk.Label(self, text="⚠", font=("Arial", 72),
-                 bg=RED_BG, fg=TEXT_WHITE).pack(pady=(60, 0))
-
-        tk.Label(self, text="CONNECTION LOST",
-                 font=("Arial", 28, "bold"),
-                 bg=RED_BG, fg=TEXT_WHITE).pack(pady=(10, 0))
-
-        tk.Label(self, text=msg,
-                 font=("Arial", 14),
-                 bg=RED_BG, fg="#FFAAAA",
-                 wraplength=500, justify="center").pack(pady=(16, 0))
-
-        tk.Label(self, text="Attempting to reconnect automatically...",
-                 font=("Arial", 12),
-                 bg=RED_BG, fg="#CC8888").pack(pady=(24, 0))
-
-        self._small_btn(self, "■  Give Up / End Session", self._on_end,
-                         bg=RED_DARK, fg=TEXT_WHITE).pack(pady=(40, 0), padx=60, fill="x")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # CONTROLS
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _on_start(self):
-        log.info(f"Starting — session_id={self.cfg['session_id']!r} passcode={'SET' if self.cfg['passcode'] else 'EMPTY'} device={self.cfg['device_idx']}")
-        self._build_streaming()
-        # Start WSS
-        self.wss = WSSStreamer(
-            session_id    = self.cfg["session_id"],
-            passcode      = self.cfg["passcode"],
-            name          = self.cfg.get("presenter", ""),
-            on_status     = self._on_wss_status,
-            on_transcript = self._noop_transcript
-        )
-        self.wss.start()
-        # Start audio
-        self.audio_eng = AudioEngine(
-            device_index = self.cfg["device_idx"],
-            on_chunk     = self._on_chunk
-        )
-        self.audio_eng.start()
-
-    def _on_chunk(self, chunk: bytes):
-        if self.state == "streaming" and self.wss:
-            self.wss.send_audio(chunk)
-
-    def _on_mute(self):
-        if self.state == "streaming":
-            self.state = "muted"
-            self.mute_btn.config(text="UNMUTE", bg=BTN_UNMUTE)
-            self.status_lbl.config(text="⏸ MUTED")
-            self._start_pulse()
-            # Doc: send 'stop' to pause transcription when muting
-            if self.wss:
-                self.wss.send_control({"type": "stop"})
-        elif self.state == "muted":
-            self.state = "streaming"
-            self.mute_btn.config(text="MUTE", bg=BTN_MUTE)
-            self.status_lbl.config(text="● LIVE")
-            self.configure(bg=GREEN_LIVE)
-            self._stop_pulse()
-            self._refresh_streaming_bg(GREEN_LIVE)
-            # Doc: send 'start' to resume transcription when unmuting
-            if self.wss:
-                self.wss.send_control({"type": "start", "languageCode": "en", "sampleRate": SAMPLE_RATE})
-
-    def _on_split(self):
-        # GOTCHA #8 — WSS split command confirmed by Jim Firby (CTO)
-        # {"type":"split"} = instant transcript boundary, no reconnect, no audio interruption
-        self.lift()
-        self.focus_force()
-        self.after(100, self._confirm_split)
-
-    def _confirm_split(self):
-        self.attributes("-topmost", True)
-        self.update()
-        result = messagebox.askyesno("Split Session",
-                                      "Split will close the current transcript and immediately start a new one.\n\nAudio will not be interrupted.\n\nProceed?",
-                                      parent=self)
-        self.attributes("-topmost", False)
-        if not result:
-            return
-        if self.wss:
-            self.wss.send_split()
-            log.info("Split command sent — transcript boundary created")
-
-    def _on_end(self):
-        self.lift()
-        self.focus_force()
-        self.after(100, self._confirm_end)
-
-    def _confirm_end(self):
-        self.attributes("-topmost", True)
-        self.update()
-        result = messagebox.askyesno("End Session", "End streaming and return to setup?",
-                                      parent=self)
-        self.attributes("-topmost", False)
-        if not result:
-            return
-        self._build_ended(reason="local")
-
-    def _on_wss_status(self, status: str):
-        self.after(0, lambda: self._handle_wss_status(status))
-
-    def _handle_wss_status(self, status: str):
-        if status == "ended" and self.state in ("streaming", "muted"):
-            # Portal ended the session — clean transition, not an error
-            self._build_ended(reason="portal")
-        elif status == "error" and self.state in ("streaming", "muted", "connecting"):
-            # Run diagnostics in background then show error screen
-            def _diag():
-                msg = diagnose_connection()
-                self.after(0, lambda: self._build_error(msg))
-            threading.Thread(target=_diag, daemon=True).start()
-        elif status == "connected" and self.state == "error":
-            # Auto-recover
-            self._build_streaming()
-
-    def _noop_transcript(self, text):
-        log.info(f"Transcript (final): {text}")
-
-    # ═══════════════════════════════════════════════════════════════════════════
-    # TIMER + METER + PULSE
-    # ═══════════════════════════════════════════════════════════════════════════
-
-    def _tick_timer(self):
-        if self.state in ("streaming", "muted") and self.timer_start:
-            elapsed = int(time.time() - self.timer_start)
-            h, rem  = divmod(elapsed, 3600)
-            m, s    = divmod(rem, 60)
-            if hasattr(self, 'timer_lbl'):
-                self.timer_lbl.config(text=f"{h:02d}:{m:02d}:{s:02d}")
-        if self.state in ("streaming", "muted"):
-            self.timer_id = self.after(1000, self._tick_timer)
-
-    def _tick_meter(self):
-        if self.state in ("streaming", "muted") and self.audio_eng:
-            pct = min(self.audio_eng.peak * 300, 100)
-            if hasattr(self, 'meter_bar'):
-                self.meter_bar['value'] = pct
-        if self.state in ("streaming", "muted"):
-            self.after(80, self._tick_meter)
-
-    def _start_pulse(self):
-        def _pulse():
-            if self.state != "muted":
-                return
-            self.pulse_state = not self.pulse_state
-            color = GREEN_PULSE1 if self.pulse_state else GREEN_PULSE2
-            self.configure(bg=color)
-            if hasattr(self, 'status_lbl'):
-                self.status_lbl.config(bg=color)
-            if hasattr(self, 'timer_lbl'):
-                self.timer_lbl.config(bg=color)
-            if hasattr(self, 'mute_btn'):
-                pass  # button keeps its own color
-            self.pulse_id = self.after(800, _pulse)
-        _pulse()
-
-    def _stop_pulse(self):
-        if self.pulse_id:
-            self.after_cancel(self.pulse_id)
-            self.pulse_id = None
-
-    def _refresh_streaming_bg(self, color):
-        """Re-apply bg color to all children after unmute."""
-        for w in self.winfo_children():
-            try:
-                if isinstance(w, (tk.Label, tk.Frame)):
-                    w.config(bg=color)
+                future.result(timeout=2.0)
             except Exception:
                 pass
+        wss.stop()
+        wss = None
+    push_status("ended", {"reason": "leave"})
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # HELPERS
-    # ═══════════════════════════════════════════════════════════════════════════
+@sio.on('disconnect')
+def on_disconnect():
+    log.info("Browser disconnected")
 
-    def _stop_all(self):
-        self._stop_pulse()
-        if self.timer_id:
-            self.after_cancel(self.timer_id)
-            self.timer_id = None
-        if self.audio_eng:
-            self.audio_eng.stop()
-            self.audio_eng = None
-        if self.wss:
-            self.wss.disconnect()
-            self.wss = None
-        # Note: do not reset state here — caller manages state transition
+# ── MAIN ──────────────────────────────────────────────────────────────────────
 
-    def _clear(self):
-        self._close_panel()
-        for w in self.winfo_children():
-            w.destroy()
-
-    def _small_btn(self, parent, text, cmd, bg=BTN_DARK, fg=TEXT_WHITE):
-        # Use Label instead of Button — Mac Tkinter ignores bg/fg on native Button widgets
-        btn = tk.Label(parent, text=text, font=("Arial", 13, "bold"),
-                       bg=bg, fg=fg, padx=12, pady=12, cursor="hand2")
-        btn.bind("<Button-1>", lambda e: cmd())
-        btn.bind("<Enter>",    lambda e: btn.config(bg=self._lighten(bg)))
-        btn.bind("<Leave>",    lambda e: btn.config(bg=bg))
-        return btn
-
-    def _lighten(self, hex_color: str) -> str:
-        """Lighten a hex color by ~20 for hover effect."""
-        hex_color = hex_color.lstrip("#")
-        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-        r, g, b = min(r + 30, 255), min(g + 30, 255), min(b + 30, 255)
-        return f"#{r:02X}{g:02X}{b:02X}"
-
-    def _on_quit(self):
-        self.lift()
-        self.focus_force()
-        self.after(100, self._confirm_quit)
-
-    def _confirm_quit(self):
-        self.attributes("-topmost", True)
-        self.update()
-        result = messagebox.askyesno("Quit", "Quit Wordly Audio Appliance?", parent=self)
-        self.attributes("-topmost", False)
-        if not result:
-            return
-        self._stop_all()
-        self.destroy()
-
-# ── ENTRY ─────────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    app = WordlyAppliance()
-    app.mainloop()
+if __name__ == '__main__':
+    import eventlet
+    import eventlet.wsgi
+    log.info("Wordly Audio Appliance starting on http://localhost:5000")
+    sio.run(app, host='0.0.0.0', port=5000, debug=False)

@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=800, initial-scale=1.0, user-scalable=no">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>Wordly Appliance</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 800px; height: 480px; overflow: hidden;
+    font-family: Arial, sans-serif;
+    background: #0D1B2E;
+    color: #FFFFFF;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .screen { position: absolute; inset: 0; display: none; }
+  .screen.active { display: flex; }
+
+  /* ══════════════════════════════════════
+     IDLE
+  ══════════════════════════════════════ */
+  #screen-idle { background: #0D1B2E; flex-direction: row; }
+
+  .idle-left {
+    width: 400px; flex-shrink: 0;
+    display: flex; flex-direction: column;
+    padding: 20px 20px 16px 24px;
+    border-right: 2px solid #1B3A6B;
+    background: #0D1B2E;
+  }
+
+  .brand { display: flex; align-items: baseline; gap: 12px; margin-bottom: 20px; }
+  .brand-logo { font-size: 42px; font-weight: 900; color: #FFFFFF; letter-spacing: -1px; }
+  .brand-sub  { font-size: 18px; color: #5A9AD5; }
+
+  .session-card {
+    background: #162540; border-radius: 8px;
+    padding: 16px 18px; margin-bottom: 14px;
+    border-left: 4px solid #2A6DB5;
+    flex-shrink: 0;
+  }
+  .card-sid      { font-family: monospace; font-size: 36px; font-weight: bold; color: #FFFFFF; letter-spacing: 2px; }
+  .card-presenter{ font-size: 22px; color: #7AAAD5; margin-top: 6px; }
+  .card-device   { font-size: 18px; color: #4A7A9A; margin-top: 8px; }
+  .card-empty    { color: #3A6A9A; }
+
+  .net-line { font-size: 18px; color: #3A6A9A; margin-top: 8px; }
+  .net-line.ok { color: #4A90D9; }
+
+  .idle-btns { display: flex; gap: 8px; margin-top: auto; padding-top: 14px; }
+  .idle-btn {
+    flex: 1; padding: 16px 8px;
+    font-size: 18px; font-weight: bold;
+    background: #162540; color: #7AAAD5;
+    border: none; border-radius: 8px; cursor: pointer;
+  }
+  .idle-btn:active { background: #1E3A60; color: #FFFFFF; }
+  .idle-btn-quit { flex: 0 0 90px; background: #2A0A0A; color: #DD6666; }
+
+  .idle-right {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: stretch; justify-content: center;
+    padding: 20px; background: #0D1B2E;
+  }
+  #btn-start {
+    flex: 1; font-size: 42px; font-weight: 900;
+    background: #1B5CAA; color: #FFFFFF;
+    border: none; border-radius: 10px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center; line-height: 1.2; letter-spacing: 1px;
+  }
+  #btn-start.disabled { background: #111E30; color: #2A4A6A; cursor: default; }
+  #btn-start:not(.disabled):active { background: #2A6CBA; }
+  .start-hint { font-size: 16px; color: #2A4A6A; text-align: center; margin-top: 10px; }
+
+  /* ══════════════════════════════════════
+     STREAMING
+  ══════════════════════════════════════ */
+  #screen-streaming { flex-direction: row; }
+
+  /* LEFT — info */
+  .stream-info {
+    width: 380px; flex-shrink: 0;
+    background: #162540;
+    display: flex; flex-direction: column;
+    padding: 20px 20px 16px 24px;
+    border-right: 3px solid #2E7D32;
+  }
+  .s-badge {
+    font-family: monospace; font-size: 52px; font-weight: 900;
+    color: #FFFFFF;
+    display: block; margin-bottom: 10px;
+    letter-spacing: 3px;
+  }
+  .s-status {
+    font-size: 72px; font-weight: 900; color: #FFFFFF;
+    line-height: 1; margin-bottom: 8px;
+  }
+  .s-timer {
+    font-family: monospace; font-size: 52px; font-weight: bold;
+    color: #55CCFF; margin-bottom: auto;
+  }
+  .meter-wrap { margin-top: 16px; }
+  .meter-label { font-size: 14px; color: #7AAACC; margin-bottom: 6px; letter-spacing: 1px; font-weight: bold; }
+  .meter-track { width: 100%; height: 28px; background: #060E1A; border-radius: 14px; overflow: hidden; border: 2px solid #1B3A6B; }
+  .meter-fill  { height: 100%; background: linear-gradient(90deg, #00FF88, #00CCFF); width: 0%; border-radius: 14px; }
+
+  /* RIGHT — green action panel */
+  .stream-actions {
+    flex: 1; background: #1A6020;
+    display: flex; flex-direction: column;
+    padding: 14px; gap: 10px;
+  }
+  #btn-mute {
+    flex: 1;
+    background: #2E8A36; color: #FFFFFF;
+    border: 3px solid #44BB55;
+    border-radius: 12px;
+    font-size: 48px; font-weight: 900;
+    cursor: pointer; letter-spacing: 2px;
+    box-shadow: inset 0 -4px 0 rgba(0,0,0,0.3);
+  }
+  #btn-mute:active { background: #3A9A42; box-shadow: none; }
+  #btn-mute.muted {
+    background: #0D2B0D; color: #55AA55;
+    border-color: #2A6A2A; font-size: 40px;
+  }
+  .stream-bottom { display: flex; gap: 10px; height: 110px; flex-shrink: 0; }
+  #btn-split {
+    flex: 1; background: #0D4A0D; color: #66EE66;
+    border: 2px solid #2A7A2A; border-radius: 10px;
+    font-size: 22px; font-weight: bold; cursor: pointer;
+    box-shadow: inset 0 -3px 0 rgba(0,0,0,0.3);
+  }
+  #btn-split:active { box-shadow: none; }
+  #btn-split.flash  { background: #1A7A1A; color: #FFFFFF; }
+  #btn-leave {
+    flex: 1; background: #1A2A50; color: #88AADD;
+    border: 2px solid #2A4A80; border-radius: 10px;
+    font-size: 22px; font-weight: bold; cursor: pointer;
+    box-shadow: inset 0 -3px 0 rgba(0,0,0,0.3);
+  }
+  #btn-leave:active { box-shadow: none; }
+  #btn-end {
+    flex: 1; background: #550000; color: #FFAAAA;
+    border: 2px solid #880000; border-radius: 10px;
+    font-size: 22px; font-weight: bold; cursor: pointer;
+    box-shadow: inset 0 -3px 0 rgba(0,0,0,0.3);
+  }
+  #btn-end:active { box-shadow: none; }
+
+  @keyframes muted-pulse {
+    0%, 100% { background: #1A6020; }
+    50%       { background: #124018; }
+  }
+  #screen-streaming.muted { animation: muted-pulse 1.6s ease-in-out infinite; }
+  #screen-streaming.muted .stream-info { background: #122030; }
+  #screen-streaming.muted .stream-actions { background: transparent; }
+
+  /* ══════════════════════════════════════
+     ERROR
+  ══════════════════════════════════════ */
+  #screen-error {
+    background: #3A0000; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center; gap: 16px; padding: 30px;
+  }
+  .e-icon  { font-size: 64px; }
+  .e-title { font-size: 42px; font-weight: 900; color: #FFFFFF; }
+  .e-msg   { font-size: 20px; color: #FFAAAA; max-width: 540px; line-height: 1.5; }
+  .e-sub   { font-size: 16px; color: #AA6666; }
+  #btn-give-up {
+    padding: 18px 40px; font-size: 22px; font-weight: bold;
+    background: #220000; color: #FFAAAA;
+    border: 2px solid #880000; border-radius: 10px; cursor: pointer;
+    margin-top: 8px;
+  }
+
+  /* ══════════════════════════════════════
+     ENDED
+  ══════════════════════════════════════ */
+  #screen-ended {
+    background: #0D1B2E; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center; gap: 12px; padding: 30px;
+  }
+  .en-title { font-size: 52px; font-weight: 900; color: #FFFFFF; }
+  .en-sub   { font-size: 22px; color: #4A7AAA; }
+  .en-cd    { font-size: 20px; color: #2A6AAA; margin-top: 10px; }
+  #btn-start-now {
+    width: 340px; padding: 20px; font-size: 26px; font-weight: bold;
+    background: #1B5CAA; color: #FFFFFF;
+    border: none; border-radius: 10px; cursor: pointer; margin-top: 14px;
+  }
+  #btn-start-now:active { background: #2A6CBA; }
+  #btn-cancel-cd {
+    width: 240px; padding: 12px; font-size: 16px;
+    background: #162540; color: #4A7AAA;
+    border: none; border-radius: 8px; cursor: pointer;
+  }
+
+  /* ══════════════════════════════════════
+     PANEL
+  ══════════════════════════════════════ */
+  #panel { position: absolute; inset: 0; background: #0D1B2E; z-index: 100; display: none; flex-direction: column; }
+  #panel.open { display: flex; }
+  .panel-header { display: flex; align-items: center; justify-content: space-between; background: #162540; padding: 12px 24px; height: 56px; flex-shrink: 0; border-bottom: 2px solid #1B3A6B; }
+  .panel-header h2 { font-size: 20px; font-weight: bold; color: #FFFFFF; }
+  .panel-close { background: #1B3A6B; border: none; color: #FFFFFF; padding: 8px 20px; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; }
+  .panel-body { flex: 1; overflow-y: auto; padding: 16px 24px; }
+  .panel-footer { padding: 14px 24px; border-top: 1px solid #1B3A6B; flex-shrink: 0; }
+  .field-label { font-size: 13px; color: #5A8AAA; margin-bottom: 6px; margin-top: 16px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: bold; }
+  input[type=text], input[type=password] { width: 100%; padding: 13px 16px; background: #060E1A; border: 1px solid #2A5298; border-radius: 6px; color: #FFFFFF; font-size: 18px; outline: none; }
+  input:focus { border-color: #5AA0E9; }
+  select { width: 100%; padding: 13px 16px; background: #060E1A; border: 1px solid #2A5298; border-radius: 6px; color: #FFFFFF; font-size: 16px; outline: none; }
+  .hint { font-size: 13px; color: #5AA0E9; margin-top: 5px; }
+  .msg  { font-size: 14px; color: #5A7A9A; margin-top: 8px; min-height: 20px; }
+  .msg.ok  { color: #44CC77; }
+  .msg.err { color: #FFAA20; }
+  .btn-save { display: block; width: 100%; padding: 18px; border: none; border-radius: 8px; background: #145C30; color: #AAFFAA; font-size: 20px; font-weight: bold; cursor: pointer; }
+  .btn-save:active { background: #1E7040; }
+  .btn-test { padding: 12px 20px; border: none; border-radius: 6px; background: #1B3A6B; color: #88AACC; font-size: 15px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+</style>
+</head>
+<body>
+
+<!-- IDLE -->
+<div id="screen-idle" class="screen active">
+  <div class="idle-left">
+    <div class="brand">
+      <span class="brand-logo">WORDLY</span>
+      <span class="brand-sub">Audio Appliance</span>
+    </div>
+    <div class="session-card" id="session-card">
+      <div class="card-sid card-empty" id="card-sid">Not configured</div>
+      <div class="card-presenter" id="card-presenter" style="color:#3A6A9A">Use Wordly Setup below.</div>
+      <div class="card-device" id="card-device"></div>
+    </div>
+    <div class="net-line" id="net-status">Checking network...</div>
+    <div class="idle-btns">
+      <button class="idle-btn" onclick="openPanel('network')">🌐 Network</button>
+      <button class="idle-btn" onclick="openPanel('wordly')">🎙 Setup</button>
+      <button class="idle-btn idle-btn-quit" onclick="confirmQuit()">✕ Quit</button>
+    </div>
+  </div>
+  <div class="idle-right">
+    <button id="btn-start" class="disabled" onclick="startSession()">START<br>SESSION</button>
+    <div class="start-hint" id="start-hint">Configure session and audio device first.</div>
+  </div>
+</div>
+
+<!-- STREAMING -->
+<div id="screen-streaming" class="screen">
+  <div class="stream-info">
+    <div class="s-badge" id="stream-badge">—</div>
+    <div class="s-status" id="stream-status">● LIVE</div>
+    <div class="s-timer"  id="stream-timer">00:00:00</div>
+    <div class="meter-wrap">
+      <div class="meter-label">AUDIO LEVEL</div>
+      <div class="meter-track"><div class="meter-fill" id="meter-fill"></div></div>
+    </div>
+  </div>
+  <div class="stream-actions">
+    <button id="btn-mute" onclick="toggleMute()">MUTE</button>
+    <div class="stream-bottom">
+      <button id="btn-split" onclick="splitSession()">✂ Split Transcript</button>
+      <button id="btn-leave" onclick="leaveSession()">⤴ Leave</button>
+      <button id="btn-end"   onclick="endSession()">■ End Session</button>
+    </div>
+  </div>
+</div>
+
+<!-- ERROR -->
+<div id="screen-error" class="screen">
+  <div class="e-icon">⚠</div>
+  <div class="e-title">CONNECTION LOST</div>
+  <div class="e-msg" id="error-msg">Attempting to reconnect...</div>
+  <div class="e-sub">Retrying automatically in the background.</div>
+  <button id="btn-give-up" onclick="endSession()">■ Give Up / End Session</button>
+</div>
+
+<!-- ENDED -->
+<div id="screen-ended" class="screen">
+  <div class="en-title">Session Ended</div>
+  <div class="en-sub" id="ended-sub">Session ended successfully.</div>
+  <div class="en-cd" id="ended-cd">Returning to setup in 60s...</div>
+  <button id="btn-start-now" onclick="returnToIdle()">START SESSION NOW →</button>
+  <button id="btn-cancel-cd" onclick="cancelCountdown()">Stay on this screen</button>
+</div>
+
+<!-- PANEL -->
+<div id="panel">
+  <div class="panel-header">
+    <h2 id="panel-title">Setup</h2>
+    <button class="panel-close" onclick="closePanel()">✕ Close</button>
+  </div>
+  <div class="panel-body" id="panel-body"></div>
+  <div class="panel-footer" id="panel-footer"></div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<script>
+const socket = io();
+let muted = false, timerInt = null, timerStart = null, cdInt = null, cdVal = 60;
+
+socket.on('connect', () => loadIdleState());
+socket.on('status',  data => handleStatus(data.status, data));
+socket.on('peak',    data => {
+  const fill = document.getElementById('meter-fill');
+  if (fill) fill.style.width = Math.min(data.peak * 300, 100).toFixed(1) + '%';
+});
+socket.on('split_ack', () => {
+  const b = document.getElementById('btn-split');
+  b.classList.add('flash'); b.textContent = '✓ Split done!';
+  setTimeout(() => { b.classList.remove('flash'); b.textContent = '✂ Split Transcript'; }, 1800);
+});
+
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + id).classList.add('active');
+}
+
+function handleStatus(status, data) {
+  if (status === 'connecting') {
+    showScreen('streaming');
+    document.getElementById('stream-status').textContent = '◌ Connecting...';
+    document.getElementById('screen-streaming').classList.remove('muted');
+  } else if (status === 'connected' || status === 'streaming') {
+    showScreen('streaming');
+    document.getElementById('stream-status').textContent = '● LIVE';
+    if (!timerStart) startTimer();
+  } else if (status === 'error') {
+    showScreen('error'); stopTimer();
+    document.getElementById('error-msg').textContent = (data && data.message) || 'Connection lost.';
+  } else if (status === 'ended') {
+    showScreen('ended'); stopTimer();
+    const r = data && data.reason;
+    document.getElementById('ended-sub').textContent =
+      r === 'portal' ? 'This session was closed from the Wordly portal.'
+    : r === 'leave'  ? 'You have left. Attendees may still be connected.'
+                     : 'Session ended successfully.';
+    startCountdown();
+  }
+}
+
+function startTimer() {
+  timerStart = Date.now();
+  timerInt = setInterval(() => {
+    const e = Math.floor((Date.now() - timerStart) / 1000);
+    document.getElementById('stream-timer').textContent =
+      [Math.floor(e/3600), Math.floor((e%3600)/60), e%60]
+      .map(n => String(n).padStart(2,'0')).join(':');
+  }, 1000);
+}
+function stopTimer() { clearInterval(timerInt); timerInt = null; timerStart = null; }
+
+function startCountdown() {
+  cdVal = 60; updateCd();
+  cdInt = setInterval(() => { cdVal--; cdVal <= 0 ? (cancelCountdown(), returnToIdle()) : updateCd(); }, 1000);
+}
+function updateCd() { document.getElementById('ended-cd').textContent = `Returning to setup in ${cdVal}s...`; }
+function cancelCountdown() {
+  clearInterval(cdInt); cdInt = null;
+  document.getElementById('ended-cd').textContent = 'Press button when ready.';
+}
+
+function startSession() {
+  if (document.getElementById('btn-start').classList.contains('disabled')) return;
+  timerStart = null; muted = false;
+  document.getElementById('screen-streaming').classList.remove('muted');
+  document.getElementById('btn-mute').textContent = 'MUTE';
+  document.getElementById('btn-mute').classList.remove('muted');
+  document.getElementById('stream-timer').textContent = '00:00:00';
+  document.getElementById('meter-fill').style.width = '0%';
+  socket.emit('start');
+  showScreen('streaming');
+  document.getElementById('stream-status').textContent = '◌ Connecting...';
+  // Flip to LIVE after 3s regardless — WSS ack sometimes delayed
+  setTimeout(() => {
+    const s = document.getElementById('stream-status');
+    if (s && s.textContent.includes('Connecting')) {
+      s.textContent = '● LIVE';
+      if (!timerStart) startTimer();
+    }
+  }, 3000);
+}
+
+function toggleMute() {
+  if (muted) {
+    socket.emit('unmute'); muted = false;
+    document.getElementById('stream-status').textContent = '● LIVE';
+    document.getElementById('screen-streaming').classList.remove('muted');
+    document.getElementById('btn-mute').textContent = 'MUTE';
+    document.getElementById('btn-mute').classList.remove('muted');
+  } else {
+    socket.emit('mute'); muted = true;
+    document.getElementById('stream-status').textContent = '⏸ MUTED';
+    document.getElementById('screen-streaming').classList.add('muted');
+    document.getElementById('btn-mute').textContent = 'UNMUTE';
+    document.getElementById('btn-mute').classList.add('muted');
+  }
+}
+
+function splitSession() {
+  if (!confirm('Split transcript now?\nAudio will not be interrupted.')) return;
+  socket.emit('split');
+}
+
+function leaveSession() {
+  if (!confirm('Leave session?\nYou disconnect — attendees remain connected.')) return;
+  stopTimer(); socket.emit('leave');
+}
+
+function endSession() {
+  if (!confirm('End session for everyone?')) return;
+  stopTimer(); socket.emit('end');
+}
+
+function returnToIdle() { cancelCountdown(); loadIdleState(); showScreen('idle'); }
+
+function confirmQuit() {
+  if (!confirm('Quit Wordly Audio Appliance?')) return;
+  fetch('/api/quit', { method: 'POST' });
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:480px;font-size:28px;color:#FFF;background:#0D1B2E">Shutting down...</div>';
+}
+
+async function loadIdleState() {
+  try {
+    const d = await (await fetch('/api/state')).json();
+    const ready = !!(d.session_id && d.passcode && d.device_idx !== null && d.device_idx !== undefined);
+    if (d.session_id) {
+      document.getElementById('card-sid').textContent       = d.session_id;
+      document.getElementById('card-sid').className         = 'card-sid';
+      document.getElementById('card-presenter').textContent = d.presenter || '';
+      document.getElementById('card-presenter').style.color = d.presenter ? '#7AAAD5' : '';
+      document.getElementById('card-device').textContent    = d.device_name ? '🎙 ' + d.device_name : '';
+      document.getElementById('stream-badge').textContent   = d.session_id;
+    } else {
+      document.getElementById('card-sid').textContent       = 'Not configured';
+      document.getElementById('card-sid').className         = 'card-sid card-empty';
+      document.getElementById('card-presenter').textContent = 'Use Wordly Setup below.';
+      document.getElementById('card-presenter').style.color = '#3A6A9A';
+      document.getElementById('card-device').textContent    = '';
+    }
+    const net   = d.network || {};
+    const netEl = document.getElementById('net-status');
+    netEl.textContent = net.ssid ? `🌐 ${net.ssid}  (${net.ip})` : net.ip ? `🌐 Wired  (${net.ip})` : '🌐 No network';
+    netEl.className   = 'net-line' + (net.connected ? ' ok' : '');
+    const btn  = document.getElementById('btn-start');
+    btn.classList.toggle('disabled', !ready);
+    document.getElementById('start-hint').textContent = ready ? '' : 'Configure session and audio device first.';
+  } catch(e) { console.error(e); }
+}
+
+function openPanel(w) { document.getElementById('panel').classList.add('open'); w === 'network' ? buildNetworkPanel() : buildWordlyPanel(); }
+function closePanel()  { document.getElementById('panel').classList.remove('open'); loadIdleState(); }
+
+async function buildNetworkPanel() {
+  document.getElementById('panel-title').textContent = '🌐 Network Setup';
+  const net = await (await fetch('/api/network/status')).json();
+  const sh  = net.connected
+    ? `<div style="color:#44CC77;font-size:20px;font-weight:bold">✓ Connected</div><div style="color:#5A8AAA;font-size:16px;margin-top:4px">IP: ${net.ip}${net.ssid?' | WiFi: '+net.ssid:''}</div>`
+    : `<div style="color:#FFAA20;font-size:20px;font-weight:bold">✗ No network connection</div>`;
+  document.getElementById('panel-body').innerHTML = `
+    <div style="padding:14px;background:#162540;border-radius:8px;margin-bottom:16px">${sh}</div>
+    <div class="field-label">WiFi SSID</div><input type="text" id="net-ssid" placeholder="Network name">
+    <div class="field-label">WiFi Password</div><input type="password" id="net-pass" placeholder="Password">
+    <div style="margin-top:16px">
+      <div class="field-label">Connection Test</div>
+      <div class="msg" id="test-msg">Press to test Wordly reachability.</div>
+      <button class="btn-test" onclick="testConnection()">Test Connection</button>
+    </div>`;
+  document.getElementById('panel-footer').innerHTML = `<button class="btn-save" onclick="saveNetwork()">✓ Save & Close</button>`;
+}
+
+async function testConnection() {
+  const el = document.getElementById('test-msg'); el.textContent = 'Testing...'; el.className = 'msg';
+  const d  = await (await fetch('/api/network/test')).json();
+  el.textContent = d.message; el.className = 'msg ' + (d.ok ? 'ok' : 'err');
+}
+
+async function saveNetwork() {
+  await fetch('/api/network', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ ssid: document.getElementById('net-ssid').value, password: document.getElementById('net-pass').value }) });
+  closePanel();
+}
+
+async function buildWordlyPanel() {
+  document.getElementById('panel-title').textContent = '🎙 Wordly Setup';
+  const d    = await (await fetch('/api/state')).json();
+  const opts = (d.devices||[]).map(x =>
+    `<option value="${x.index}" ${x.index===d.device_idx?'selected':''}>${x.index}: ${x.name}</option>`
+  ).join('') || '<option value="">No devices found</option>';
+  document.getElementById('panel-body').innerHTML = `
+    <div class="field-label">Session ID or Join Link</div>
+    <input type="text" id="w-link" placeholder="Paste join link or ABCD-1234" value="${d.session_id||''}">
+    <div class="hint" id="w-hint">Paste a join link or type session ID directly.</div>
+    <div class="field-label">Session ID</div>
+    <input type="text" id="w-sid" placeholder="ABCD-1234" value="${d.session_id||''}" style="font-family:monospace;font-size:28px;font-weight:bold;letter-spacing:3px">
+    <div class="field-label">Passcode</div>
+    <input type="password" id="w-pass" placeholder="Session passcode" value="${d.passcode||''}">
+    <div class="field-label">Presenter / Speaker Name</div>
+    <input type="text" id="w-presenter" value="${d.presenter||''}">
+    <div class="field-label">Audio Input Device</div>
+    <select id="w-device">${opts}</select>
+    <div class="msg" id="w-msg" style="margin-top:12px"></div>
+    <button class="btn-test" onclick="testAudio()">Test Audio (2s)</button>`;
+  document.getElementById('panel-footer').innerHTML = `<button class="btn-save" onclick="saveWordly()">✓ Save & Close</button>`;
+
+  document.getElementById('w-link').addEventListener('input', e => {
+    const m    = e.target.value.match(/join\.wordly\.ai\/join\/([A-Za-z0-9]{4}-?[0-9]{4})/);
+    const hint = document.getElementById('w-hint');
+    if (m) {
+      let sid = m[1].toUpperCase().replace(/[^A-Z0-9]/g,'');
+      if (sid.length===8) sid = sid.slice(0,4)+'-'+sid.slice(4);
+      document.getElementById('w-sid').value = sid;
+      const km = e.target.value.match(/[?&]key=([^&\s]+)/);
+      if (km) document.getElementById('w-pass').value = km[1];
+      hint.textContent = `✓ Parsed: ${sid}`; hint.style.color = '#44CC77';
+    } else { hint.textContent = 'Paste a join link or type session ID directly.'; hint.style.color = '#5AA0E9'; }
+  });
+}
+
+async function testAudio() {
+  const idx = document.getElementById('w-device').value;
+  const msg = document.getElementById('w-msg'); msg.textContent = 'Recording 2s...'; msg.className = 'msg';
+  const d   = await (await fetch(`/api/audio/test?device=${idx}`)).json();
+  msg.textContent = d.message; msg.className = 'msg '+(d.ok?'ok':'err');
+}
+
+async function saveWordly() {
+  const sel = document.getElementById('w-device');
+  const d   = await (await fetch('/api/config', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({
+    session_id:  document.getElementById('w-link').value || document.getElementById('w-sid').value,
+    passcode:    document.getElementById('w-pass').value,
+    presenter:   document.getElementById('w-presenter').value,
+    device_idx:  sel.value !== '' ? parseInt(sel.value) : null,
+    device_name: sel.options[sel.selectedIndex]?.text || '',
+  })})).json();
+  if (d.ok) closePanel();
+  else { const m = document.getElementById('w-msg'); m.textContent = d.error; m.className = 'msg err'; }
+}
+
+loadIdleState();
+</script>
+</body>
+</html>
