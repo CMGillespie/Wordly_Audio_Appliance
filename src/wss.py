@@ -64,12 +64,9 @@ class WSSStreamer:
         self.audio_q.put(None)
 
     def disconnect(self):
+        # Fire-and-forget — don't block. UI has already updated.
         if self.loop and self.connected:
-            future = asyncio.run_coroutine_threadsafe(self._disconnect(), self.loop)
-            try:
-                future.result(timeout=2.0)
-            except Exception as e:
-                log.warning(f"Disconnect wait error: {e}")
+            asyncio.run_coroutine_threadsafe(self._disconnect(), self.loop)
         self.stop()
 
     def _run(self):
@@ -172,9 +169,7 @@ class WSSStreamer:
         if self.ws and self.connected:
             try:
                 await self.ws.send(json.dumps({"type": "stop"}))
-                await asyncio.sleep(0.2)
                 await self.ws.send(json.dumps({"type": "disconnect", "end": True}))
-                await asyncio.sleep(0.3)
                 log.info("WSS disconnect sent cleanly")
             except Exception as e:
                 log.warning(f"Disconnect error: {e}")

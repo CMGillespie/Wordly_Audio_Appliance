@@ -276,6 +276,16 @@ def api_quit():
     threading.Thread(target=_quit, daemon=True).start()
     return jsonify({"ok": True})
 
+@app.route('/api/keyboard', methods=['POST'])
+def api_keyboard():
+    """Launch onboard virtual keyboard on Pi display."""
+    import subprocess
+    try:
+        subprocess.Popen(['onboard'], env={**__import__('os').environ, 'DISPLAY': ':0'})
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)})
+
 # ── SOCKETIO EVENTS ───────────────────────────────────────────────────────────
 
 @sio.on('connect')
