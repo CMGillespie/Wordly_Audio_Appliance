@@ -118,7 +118,7 @@
     background: #2E8A36; color: #FFFFFF;
     border: 3px solid #44BB55;
     border-radius: 12px;
-    font-size: 48px; font-weight: 900;
+    font-size: 56px; font-weight: 900;
     cursor: pointer; letter-spacing: 2px;
     box-shadow: inset 0 -4px 0 rgba(0,0,0,0.3);
   }
@@ -127,9 +127,9 @@
     background: #0D2B0D; color: #55AA55;
     border-color: #2A6A2A; font-size: 40px;
   }
-  .stream-bottom { display: flex; gap: 10px; height: 130px; flex-shrink: 0; }
+  .stream-bottom { display: flex; gap: 6px; height: 150px; flex-shrink: 0; }
   #btn-split {
-    flex: 1; background: #0D4A0D; color: #66EE66;
+    flex: 1; font-size: 26px !important; background: #0D4A0D; color: #66EE66;
     border: 2px solid #2A7A2A; border-radius: 10px;
     font-size: 28px; font-weight: bold; cursor: pointer;
     box-shadow: inset 0 -3px 0 rgba(0,0,0,0.3);
@@ -137,14 +137,14 @@
   #btn-split:active { box-shadow: none; }
   #btn-split.flash  { background: #1A7A1A; color: #FFFFFF; }
   #btn-leave {
-    flex: 1; background: #1A2A50; color: #88AADD;
+    flex: 1; font-size: 26px !important; background: #1A2A50; color: #88AADD;
     border: 2px solid #2A4A80; border-radius: 10px;
     font-size: 28px; font-weight: bold; cursor: pointer;
     box-shadow: inset 0 -3px 0 rgba(0,0,0,0.3);
   }
   #btn-leave:active { box-shadow: none; }
   #btn-end {
-    flex: 1; background: #550000; color: #FFAAAA;
+    flex: 1; font-size: 26px !important; background: #550000; color: #FFAAAA;
     border: 2px solid #880000; border-radius: 10px;
     font-size: 28px; font-weight: bold; cursor: pointer;
     box-shadow: inset 0 -3px 0 rgba(0,0,0,0.3);
@@ -268,9 +268,9 @@
   <div class="stream-actions">
     <button id="btn-mute" onclick="toggleMute()">MUTE</button>
     <div class="stream-bottom">
-      <button id="btn-split" onclick="splitSession()">✂ Split Transcript</button>
-      <button id="btn-leave" onclick="leaveSession()">⤴ Leave</button>
-      <button id="btn-end"   onclick="endSession()">■ End Session</button>
+      <button id="btn-split" onclick="splitSession()">✂ SPLIT</button>
+      <button id="btn-leave" onclick="leaveSession()">⤴ LEAVE</button>
+      <button id="btn-end"   onclick="endSession()">■ END</button>
     </div>
   </div>
 </div>
@@ -316,8 +316,8 @@ socket.on('peak',    data => {
 });
 socket.on('split_ack', () => {
   const b = document.getElementById('btn-split');
-  b.classList.add('flash'); b.textContent = '✓ Split done!';
-  setTimeout(() => { b.classList.remove('flash'); b.textContent = '✂ Split Transcript'; }, 1800);
+  b.classList.add('flash'); b.textContent = '✓ SPLIT!';
+  setTimeout(() => { b.classList.remove('flash'); b.textContent = '✂ SPLIT'; }, 1800);
 });
 
 function showScreen(id) {
