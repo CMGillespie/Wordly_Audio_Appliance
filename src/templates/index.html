@@ -515,7 +515,7 @@ async function buildWordlyPanel() {
     <div class="msg" id="w-msg" style="margin-top:12px"></div>
     <button class="btn-test" onclick="testAudio()">Test Audio (2s)</button>`;
   document.getElementById('panel-footer').innerHTML = `
-    <button class="btn-save" onclick="saveWordly()">✓ Save & Close</button>
+    <button class="btn-save" onclick="saveWordly()">✓ Save & Close</button>`;
 
   document.getElementById('w-link').addEventListener('input', e => {
     const m    = e.target.value.match(/join\.wordly\.ai\/join\/([A-Za-z0-9]{4}-?[0-9]{4})/);
