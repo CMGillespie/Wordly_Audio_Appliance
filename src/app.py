@@ -308,14 +308,24 @@ def on_start():
 
 @sio.on('mute')
 def on_mute():
+    global streaming
+    streaming = False          # stop feeding chunks to WSS queue
     if wss:
+        # Drain any queued audio before telling Wordly to stop
+        try:
+            while not wss.audio_q.empty():
+                wss.audio_q.get_nowait()
+        except Exception:
+            pass
         wss.send_control({"type": "stop"})
     push_status("muted")
 
 @sio.on('unmute')
 def on_unmute():
+    global streaming
     if wss:
         wss.send_control({"type": "start", "languageCode": "en", "sampleRate": SAMPLE_RATE})
+    streaming = True           # resume feeding chunks
     push_status("streaming")
 
 @sio.on('split')
