@@ -167,17 +167,19 @@ def _stop_all():
     if audio_eng:
         audio_eng.stop()
         audio_eng = None
-    # Disconnect WSS in background — don't block the UI thread
+    # Disconnect WSS in background — UI already updated, give it time to send
     _wss = wss
+    globals()['wss'] = None
     if _wss:
         def _bg_disconnect():
             try:
                 _wss.disconnect()
+                log.info("Background disconnect complete")
             except Exception as e:
                 log.warning(f"Background disconnect error: {e}")
         import threading
-        threading.Thread(target=_bg_disconnect, daemon=True).start()
-    globals()['wss'] = None
+        t = threading.Thread(target=_bg_disconnect, daemon=False)  # non-daemon so it completes
+        t.start()
 
 # ── HTTP ROUTES ───────────────────────────────────────────────────────────────
 

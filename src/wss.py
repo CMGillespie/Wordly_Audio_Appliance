@@ -169,8 +169,9 @@ class WSSStreamer:
         if self.ws and self.connected:
             try:
                 await self.ws.send(json.dumps({"type": "stop"}))
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.3)
                 await self.ws.send(json.dumps({"type": "disconnect", "end": True}))
+                await asyncio.sleep(0.3)
                 log.info("WSS disconnect sent cleanly")
             except Exception as e:
                 log.warning(f"Disconnect error: {e}")
