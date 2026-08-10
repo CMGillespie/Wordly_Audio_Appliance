@@ -163,12 +163,21 @@ def on_transcript(text: str):
 def _stop_all():
     global audio_eng, wss, streaming
     streaming = False
+    # Stop audio immediately
     if audio_eng:
         audio_eng.stop()
         audio_eng = None
-    if wss:
-        wss.disconnect()
-        wss = None
+    # Disconnect WSS in background — don't block the UI thread
+    _wss = wss
+    if _wss:
+        def _bg_disconnect():
+            try:
+                _wss.disconnect()
+            except Exception as e:
+                log.warning(f"Background disconnect error: {e}")
+        import threading
+        threading.Thread(target=_bg_disconnect, daemon=True).start()
+    globals()['wss'] = None
 
 # ── HTTP ROUTES ───────────────────────────────────────────────────────────────
 
@@ -336,8 +345,8 @@ def on_split():
 
 @sio.on('end')
 def on_end():
-    _stop_all()
-    push_status("ended", {"reason": "local"})
+    push_status("ended", {"reason": "local"})  # UI responds immediately
+    _stop_all()                                  # cleanup in background
 
 @sio.on('leave')
 def on_leave():
@@ -347,28 +356,26 @@ def on_leave():
     if audio_eng:
         audio_eng.stop()
         audio_eng = None
-    if wss:
-        # Override disconnect to send end=false
-        import asyncio, json as _json
-        async def _leave():
-            if wss.ws and wss.connected:
-                try:
-                    await wss.ws.send(_json.dumps({"type": "stop"}))
-                    await asyncio.sleep(0.2)
-                    await wss.ws.send(_json.dumps({"type": "disconnect", "end": False}))
-                    await asyncio.sleep(0.2)
-                    log.info("WSS leave sent — session continues for attendees")
-                except Exception as e:
-                    log.warning(f"Leave error: {e}")
-        if wss.loop:
-            future = asyncio.run_coroutine_threadsafe(_leave(), wss.loop)
-            try:
-                future.result(timeout=2.0)
-            except Exception:
-                pass
-        wss.stop()
-        wss = None
+    # Push status immediately — don't wait for WSS cleanup
     push_status("ended", {"reason": "leave"})
+    _wss = wss
+    globals()['wss'] = None
+    if _wss:
+        import asyncio, json as _json, threading
+        def _bg_leave():
+            async def _do():
+                if _wss.ws and _wss.connected:
+                    try:
+                        await _wss.ws.send(_json.dumps({"type": "stop"}))
+                        await asyncio.sleep(0.2)
+                        await _wss.ws.send(_json.dumps({"type": "disconnect", "end": False}))
+                        log.info("WSS leave sent — session continues for attendees")
+                    except Exception as e:
+                        log.warning(f"Leave error: {e}")
+                _wss.stop()
+            if _wss.loop:
+                asyncio.run_coroutine_threadsafe(_do(), _wss.loop)
+        threading.Thread(target=_bg_leave, daemon=True).start()
 
 @sio.on('disconnect')
 def on_disconnect():
