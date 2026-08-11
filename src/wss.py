@@ -52,7 +52,7 @@ class WSSStreamer:
 
     def send_control(self, msg: dict):
         async def _send():
-            if self.ws and self.connected:
+            if self.ws:
                 await self.ws.send(json.dumps(msg))
                 log.info(f"Control sent: {msg}")
         if self.loop:
@@ -166,7 +166,7 @@ class WSSStreamer:
                     log.warning(f"Recv error: {e}")
 
     async def _disconnect(self):
-        if self.ws and self.connected:
+        if self.ws:
             try:
                 await self.ws.send(json.dumps({"type": "stop"}))
                 await asyncio.sleep(0.3)
