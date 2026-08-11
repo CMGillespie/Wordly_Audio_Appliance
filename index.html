@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=800, initial-scale=1.0, user-scalable=no">
+<title>Wordly Presenter</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100vh; overflow: hidden;
+    font-family: Arial, sans-serif;
+    background: #0D1B2E; color: #FFFFFF;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* ── SCREENS ── */
+  .screen { position: fixed; inset: 0; display: none; }
+  .screen.active { display: flex; }
+
+  /* ── PANEL OVERLAY ── */
+  #panel { position: fixed; inset: 0; background: #0D1B2E; z-index: 100; display: none; flex-direction: column; }
+  #panel.open { display: flex; }
+  .panel-hdr { display: flex; align-items: center; justify-content: space-between; background: #162540; padding: 12px 24px; height: 56px; flex-shrink: 0; border-bottom: 2px solid #1B3A6B; }
+  .panel-hdr h2 { font-size: 20px; font-weight: bold; }
+  .panel-close { background: #1B3A6B; border: none; color: #FFF; padding: 8px 20px; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; }
+  .panel-body { flex: 1; overflow-y: auto; padding: 16px 24px; }
+  .panel-foot { padding: 14px 24px; border-top: 1px solid #1B3A6B; flex-shrink: 0; }
+
+  /* ── FORM ── */
+  .flabel { font-size: 12px; color: #5A8AAA; margin-bottom: 5px; margin-top: 16px; text-transform: uppercase; letter-spacing: 0.5px; font-weight: bold; display: block; }
+  input[type=text], input[type=password] {
+    width: 100%; padding: 13px 16px; background: #060E1A;
+    border: 1px solid #2A5298; border-radius: 6px;
+    color: #FFF; font-size: 18px; outline: none;
+  }
+  input:focus { border-color: #5AA0E9; }
+  select { width: 100%; padding: 13px 16px; background: #060E1A; border: 1px solid #2A5298; border-radius: 6px; color: #FFF; font-size: 16px; outline: none; }
+  .pw-wrap { position: relative; }
+  .pw-toggle { position: absolute; right: 14px; top: 50%; transform: translateY(-50%); background: none; border: none; color: #5A8AAA; font-size: 14px; cursor: pointer; padding: 4px; }
+  .hint { font-size: 12px; color: #5AA0E9; margin-top: 5px; }
+  .msg  { font-size: 13px; color: #5A7A9A; margin-top: 8px; min-height: 18px; }
+  .msg.ok  { color: #44CC77; }
+  .msg.err { color: #FFAA20; }
+  .btn-save { display: block; width: 100%; padding: 18px; border: none; border-radius: 8px; background: #145C30; color: #AAFFAA; font-size: 20px; font-weight: bold; cursor: pointer; }
+  .btn-save:active { background: #1E7040; }
+  .btn-test { padding: 12px 20px; border: none; border-radius: 6px; background: #1B3A6B; color: #88AACC; font-size: 14px; font-weight: bold; cursor: pointer; margin-top: 10px; }
+
+  /* ══ IDLE ══ */
+  #screen-idle { background: #0D1B2E; flex-direction: row; }
+  .idle-left { width: 420px; flex-shrink: 0; display: flex; flex-direction: column; padding: 20px 16px 16px 22px; border-right: 2px solid #1B3A6B; }
+  .brand { display: flex; align-items: baseline; gap: 10px; margin-bottom: 18px; }
+  .brand-logo { font-size: 32px; font-weight: 900; color: #FFF; }
+  .brand-sub  { font-size: 15px; color: #4A90D9; }
+  .session-card { background: #162540; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px; border-left: 4px solid #2A6DB5; }
+  .card-sid  { font-family: monospace; font-size: 30px; font-weight: bold; color: #FFF; letter-spacing: 2px; }
+  .card-sub  { font-size: 16px; color: #7AAAD5; margin-top: 4px; }
+  .card-dev  { font-size: 13px; color: #4A6A8A; margin-top: 6px; }
+  .net-line  { font-size: 14px; color: #3A5A7A; margin-bottom: auto; }
+  .net-line.ok { color: #4A90D9; }
+  .idle-btns-top { margin-top: 14px; }
+  .idle-btns-top button { display: block; width: 100%; padding: 20px; font-size: 22px; font-weight: bold; background: #162540; color: #FFFFFF; border: none; border-radius: 8px; cursor: pointer; margin-bottom: 8px; text-align: left; }
+  .idle-btns-top button:active { background: #1E3A60; }
+  .idle-btns-bot { display: flex; gap: 8px; }
+  .idle-btns-bot button { flex: 1; padding: 16px 8px; font-size: 20px; font-weight: bold; background: #162540; color: #FFFFFF; border: none; border-radius: 8px; cursor: pointer; }
+  .idle-btns-bot button:active { background: #1E3A60; }
+  .btn-quit { background: #2A0A0A !important; color: #FF8888 !important; }
+  .idle-right { flex: 1; display: flex; flex-direction: column; align-items: stretch; justify-content: center; padding: 20px; }
+  #btn-start { flex: 1; font-size: 36px; font-weight: 900; background: #1B5CAA; color: #FFF; border: none; border-radius: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; text-align: center; line-height: 1.2; }
+  #btn-start.disabled { background: #111E30; color: #2A4A6A; cursor: default; }
+  #btn-start:not(.disabled):active { background: #2A6CBA; }
+  .start-hint { font-size: 14px; color: #2A4A6A; text-align: center; margin-top: 10px; }
+
+  /* ══ STREAMING ══ */
+  #screen-streaming { flex-direction: row; }
+  .stream-info { width: 420px; flex-shrink: 0; background: #162540; display: flex; flex-direction: column; padding: 20px 20px 16px 24px; border-right: 3px solid #2E7D32; }
+  .s-badge  { font-family: monospace; font-size: 40px; font-weight: 900; color: #FFF; display: block; margin-bottom: 8px; letter-spacing: 2px; }
+  .s-status { font-size: 64px; font-weight: 900; color: #FFF; line-height: 1; margin-bottom: 8px; }
+  .s-timer  { font-family: monospace; font-size: 44px; font-weight: bold; color: #55CCFF; margin-bottom: auto; }
+  .meter-wrap { margin-top: 14px; }
+  .meter-label { font-size: 12px; color: #7AAACC; margin-bottom: 5px; letter-spacing: 1px; font-weight: bold; }
+  .meter-track { width: 100%; height: 24px; background: #060E1A; border-radius: 12px; overflow: hidden; border: 2px solid #1B3A6B; }
+  .meter-fill  { height: 100%; background: linear-gradient(90deg, #00FF88, #00CCFF); width: 0%; border-radius: 12px; transition: width 0.08s; }
+  .stream-actions { flex: 1; background: #1A6020; display: flex; flex-direction: column; padding: 14px; gap: 10px; }
+  #btn-mute { flex: 1; background: #2E8A36; color: #FFF; border: 3px solid #44BB55; border-radius: 12px; font-size: 44px; font-weight: 900; cursor: pointer; letter-spacing: 2px; box-shadow: inset 0 -4px 0 rgba(0,0,0,0.3); }
+  #btn-mute:active { box-shadow: none; }
+  #btn-mute.muted { background: #0D2B0D; color: #66AA66; border-color: #2A6A2A; font-size: 36px; }
+  .stream-bot { display: flex; gap: 10px; height: 120px; flex-shrink: 0; }
+  #btn-split { flex: 1; background: #0D4A0D; color: #66EE66; border: 2px solid #2A7A2A; border-radius: 10px; font-size: 24px; font-weight: bold; cursor: pointer; }
+  #btn-split.flash { background: #1E7A1E; color: #FFF; }
+  #btn-leave { flex: 1; background: #1A2A50; color: #88AADD; border: 2px solid #2A4A80; border-radius: 10px; font-size: 24px; font-weight: bold; cursor: pointer; }
+  #btn-end   { flex: 1; background: #550000; color: #FFAAAA; border: 2px solid #880000; border-radius: 10px; font-size: 24px; font-weight: bold; cursor: pointer; }
+
+  /* mute pulse */
+  @keyframes muted-pulse { 0%,100%{opacity:1} 50%{opacity:0.45} }
+  #screen-streaming.muted { animation: muted-pulse 2.4s ease-in-out infinite; }
+
+  /* ══ ERROR ══ */
+  #screen-error { background: #3A0000; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 16px; padding: 30px; }
+  .e-icon  { font-size: 60px; }
+  .e-title { font-size: 36px; font-weight: 900; }
+  .e-msg   { font-size: 18px; color: #FFAAAA; max-width: 540px; line-height: 1.5; }
+  .e-sub   { font-size: 14px; color: #AA6666; }
+  #btn-give-up { padding: 18px 40px; font-size: 20px; font-weight: bold; background: #220000; color: #FFAAAA; border: 2px solid #880000; border-radius: 10px; cursor: pointer; }
+
+  /* ══ ENDED ══ */
+  #screen-ended { background: #0D1B2E; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 12px; padding: 30px; }
+  .en-title { font-size: 48px; font-weight: 900; }
+  .en-sub   { font-size: 20px; color: #4A7AAA; }
+  .en-cd    { font-size: 18px; color: #2A6AAA; margin-top: 8px; }
+  #btn-restart { width: 320px; padding: 20px; font-size: 24px; font-weight: bold; background: #1B5CAA; color: #FFF; border: none; border-radius: 10px; cursor: pointer; margin-top: 14px; }
+  #btn-cancel-cd { width: 220px; padding: 12px; font-size: 15px; background: #162540; color: #4A7AAA; border: none; border-radius: 8px; cursor: pointer; }
+
+  /* ── CONFIRM DIALOG ── */
+  #confirm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 200; display: none; align-items: center; justify-content: center; }
+  #confirm-overlay.open { display: flex; }
+  .confirm-box { background: #162540; border-radius: 12px; padding: 32px; max-width: 480px; width: 90%; text-align: center; border: 2px solid #2A5298; }
+  .confirm-msg { font-size: 20px; color: #FFF; margin-bottom: 24px; line-height: 1.4; }
+  .confirm-btns { display: flex; gap: 12px; justify-content: center; }
+  .confirm-yes { padding: 16px 32px; font-size: 18px; font-weight: bold; background: #1B5CAA; color: #FFF; border: none; border-radius: 8px; cursor: pointer; }
+  .confirm-no  { padding: 16px 32px; font-size: 18px; font-weight: bold; background: #162540; color: #8AAACC; border: 2px solid #2A5298; border-radius: 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<!-- IDLE -->
+<div id="screen-idle" class="screen active">
+  <div class="idle-left">
+    <div class="brand"><span class="brand-logo">WORDLY</span><span class="brand-sub">Presenter</span></div>
+    <div class="session-card">
+      <div class="card-sid" id="card-sid">Not configured</div>
+      <div class="card-sub" id="card-sub" style="color:#3A6A9A">Use Wordly Session Config below.</div>
+      <div class="card-dev" id="card-dev"></div>
+    </div>
+    <div class="net-line" id="net-line">Checking network...</div>
+    <div class="idle-btns-top">
+      <button onclick="openPanel('wordly')">🎙 Wordly Session Config</button>
+    </div>
+    <div class="idle-btns-bot" style="margin-top:8px">
+      <button onclick="openPanel('network')">🌐 Network</button>
+      <button class="btn-quit" onclick="confirmAction('Quit this app?', doQuit)">✕ Quit</button>
+    </div>
+  </div>
+  <div class="idle-right">
+    <button id="btn-start" class="disabled" onclick="startSession()">START<br>SESSION</button>
+    <div class="start-hint" id="start-hint">Configure session first.</div>
+  </div>
+</div>
+
+<!-- STREAMING -->
+<div id="screen-streaming" class="screen">
+  <div class="stream-info">
+    <div class="s-badge" id="s-badge">—</div>
+    <div class="s-status" id="s-status">● LIVE</div>
+    <div class="s-timer"  id="s-timer">00:00:00</div>
+    <div class="meter-wrap">
+      <div class="meter-label">AUDIO LEVEL</div>
+      <div class="meter-track"><div class="meter-fill" id="meter-fill"></div></div>
+    </div>
+  </div>
+  <div class="stream-actions">
+    <button id="btn-mute" onclick="toggleMute()">MUTE</button>
+    <div class="stream-bot">
+      <button id="btn-split" onclick="confirmAction('Split transcript now?\nAudio continues uninterrupted.', doSplit)">✂ SPLIT</button>
+      <button id="btn-leave" onclick="confirmAction('Leave session?\nAttendees remain connected.', doLeave)">⤴ LEAVE</button>
+      <button id="btn-end"   onclick="confirmAction('End session for everyone?', doEnd)">■ END SESSION</button>
+    </div>
+  </div>
+</div>
+
+<!-- ERROR -->
+<div id="screen-error" class="screen">
+  <div class="e-icon">⚠</div>
+  <div class="e-title">CONNECTION LOST</div>
+  <div class="e-msg" id="e-msg">Attempting to reconnect...</div>
+  <div class="e-sub">Check network and session details.</div>
+  <button id="btn-give-up" onclick="confirmAction('Give up and return to setup?', doEnd)">■ Give Up</button>
+</div>
+
+<!-- ENDED -->
+<div id="screen-ended" class="screen">
+  <div class="en-title">Session Ended</div>
+  <div class="en-sub" id="en-sub">Session ended successfully.</div>
+  <div class="en-cd"  id="en-cd">Returning to setup in 60s...</div>
+  <button id="btn-restart" onclick="returnToIdle()">START SESSION NOW →</button>
+  <button id="btn-cancel-cd" onclick="cancelCountdown()">Stay on this screen</button>
+</div>
+
+<!-- PANEL -->
+<div id="panel">
+  <div class="panel-hdr">
+    <h2 id="panel-title">Setup</h2>
+    <button class="panel-close" onclick="closePanel()">✕ Close</button>
+  </div>
+  <div class="panel-body" id="panel-body"></div>
+  <div class="panel-foot" id="panel-foot"></div>
+</div>
+
+<!-- CONFIRM DIALOG -->
+<div id="confirm-overlay">
+  <div class="confirm-box">
+    <div class="confirm-msg" id="confirm-msg"></div>
+    <div class="confirm-btns">
+      <button class="confirm-yes" id="confirm-yes">Yes</button>
+      <button class="confirm-no"  onclick="closeConfirm()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// CONFIG — stored in localStorage
+// ═══════════════════════════════════════════════════════════════
+const CONNECTION_CODE = '9005'; // GOTCHA #9 — required in every connect message
+const WSS_ENDPOINT    = 'wss://endpoint.wordly.ai/present';
+const SAMPLE_RATE     = 16000;
+const CHUNK_MS        = 100;
+
+let cfg = JSON.parse(localStorage.getItem('wordly_cfg') || '{}');
+// cfg: { sessionId, passcode, presenter, deviceId, deviceLabel }
+
+function saveCfg() { localStorage.setItem('wordly_cfg', JSON.stringify(cfg)); }
+
+// ═══════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════
+let ws           = null;
+let audioCtx     = null;
+let mediaStream  = null;
+let processor    = null;
+let muted        = false;
+let timerInt     = null;
+let timerStart   = null;
+let cdInt        = null;
+let cdVal        = 60;
+let connected    = false;
+let intentionalEnd = false;  // set before sending disconnect to suppress portal-end handler
+
+// ═══════════════════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════════════════
+function normalizeSessionId(raw) {
+  const cleaned = raw.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  if (cleaned.length !== 8 || !/^[A-Z]{4}\d{4}$/.test(cleaned)) return '';
+  return cleaned.slice(0,4) + '-' + cleaned.slice(4);
+}
+
+function parseJoinLink(raw) {
+  const m = raw.match(/join\.wordly\.ai\/join\/([A-Za-z0-9]{4}-?[0-9]{4})/);
+  if (!m) return {sid: '', passcode: ''};
+  const sid = normalizeSessionId(m[1]);
+  const km  = raw.match(/[?&]key=([^&\s]+)/);
+  return {sid, passcode: km ? km[1] : ''};
+}
+
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + id).classList.add('active');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CONFIRM DIALOG — replaces browser confirm() (blocked in --app mode)
+// ═══════════════════════════════════════════════════════════════
+let confirmCallback = null;
+function confirmAction(msg, cb) {
+  document.getElementById('confirm-msg').textContent = msg;
+  confirmCallback = cb;
+  document.getElementById('confirm-overlay').classList.add('open');
+  document.getElementById('confirm-yes').onclick = () => { closeConfirm(); cb(); };
+}
+function closeConfirm() {
+  document.getElementById('confirm-overlay').classList.remove('open');
+  confirmCallback = null;
+}
+// confirm-yes handler set via confirmAction to avoid closure issues
+
+// ═══════════════════════════════════════════════════════════════
+// NETWORK STATUS
+// ═══════════════════════════════════════════════════════════════
+function checkNetwork() {
+  const el = document.getElementById('net-line');
+  if (navigator.onLine) {
+    el.textContent = '🌐 Network connected';
+    el.className = 'net-line ok';
+  } else {
+    el.textContent = '🌐 No network connection';
+    el.className = 'net-line';
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// IDLE STATE
+// ═══════════════════════════════════════════════════════════════
+function loadIdle() {
+  checkNetwork();
+  const sid = cfg.sessionId || '';
+  const ready = !!(sid && cfg.passcode && cfg.deviceId !== undefined && cfg.deviceId !== null && cfg.deviceId !== '');
+
+  document.getElementById('card-sid').textContent = sid || 'Not configured';
+  document.getElementById('card-sid').style.color = sid ? '#FFFFFF' : '#3A6A9A';
+  document.getElementById('card-sub').textContent = cfg.presenter || (sid ? '' : 'Use Wordly Session Config below.');
+  document.getElementById('card-sub').style.color = cfg.presenter ? '#7AAAD5' : '#3A6A9A';
+  document.getElementById('card-dev').textContent = cfg.deviceLabel ? '🎙 ' + cfg.deviceLabel : '';
+  document.getElementById('s-badge').textContent  = sid || '—';
+
+  const btn  = document.getElementById('btn-start');
+  const hint = document.getElementById('start-hint');
+  btn.classList.toggle('disabled', !ready);
+  hint.textContent = ready ? '' : 'Configure session first.';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// PANELS
+// ═══════════════════════════════════════════════════════════════
+function openPanel(which) {
+  document.getElementById('panel').classList.add('open');
+  which === 'network' ? buildNetworkPanel() : buildWordlyPanel();
+}
+function closePanel() {
+  document.getElementById('panel').classList.remove('open');
+  loadIdle();
+}
+
+function buildNetworkPanel() {
+  document.getElementById('panel-title').textContent = '🌐 Network';
+  const online = navigator.onLine;
+  document.getElementById('panel-body').innerHTML = `
+    <div style="padding:14px;background:#162540;border-radius:8px;margin-bottom:16px">
+      <div style="color:${online?'#44CC77':'#FFAA20'};font-size:18px;font-weight:bold">${online ? '✓ Connected' : '✗ No network'}</div>
+    </div>
+    <div class="flabel">WiFi SSID (for reference)</div>
+    <input type="text" id="net-ssid" placeholder="Network name" value="${cfg.wifiSsid||''}">
+    <div style="margin-top:16px">
+      <div class="flabel">Connection Test</div>
+      <div class="msg" id="test-msg">Press to test Wordly reachability.</div>
+      <button class="btn-test" onclick="testConnection()">Test Connection</button>
+    </div>`;
+  document.getElementById('panel-foot').innerHTML = `<button class="btn-save" onclick="saveNetwork()">✓ Save & Close</button>`;
+}
+
+async function testConnection() {
+  const el = document.getElementById('test-msg');
+  el.textContent = 'Testing...'; el.className = 'msg';
+  try {
+    const r = await fetch('https://wordly.ai/favicon.ico', {mode:'no-cors', cache:'no-store'});
+    el.textContent = '✓ Network OK — Wordly reachable.'; el.className = 'msg ok';
+  } catch(e) {
+    el.textContent = '✗ Cannot reach Wordly — check network.'; el.className = 'msg err';
+  }
+}
+
+function saveNetwork() {
+  cfg.wifiSsid = document.getElementById('net-ssid').value.trim();
+  saveCfg(); closePanel();
+}
+
+async function buildWordlyPanel() {
+  document.getElementById('panel-title').textContent = '🎙 Wordly Session Config';
+
+  // Enumerate audio devices
+  let devOpts = '<option value="">Select device</option>';
+  try {
+    await navigator.mediaDevices.getUserMedia({audio: true}).then(s => s.getTracks().forEach(t => t.stop()));
+    const devs = await navigator.mediaDevices.enumerateDevices();
+    const inputs = devs.filter(d => d.kind === 'audioinput');
+    devOpts = inputs.map(d =>
+      `<option value="${d.deviceId}" ${d.deviceId===cfg.deviceId?'selected':''}>${d.label || 'Microphone ' + d.deviceId.slice(0,6)}</option>`
+    ).join('');
+  } catch(e) {
+    devOpts = '<option value="">Mic permission required</option>';
+  }
+
+  document.getElementById('panel-body').innerHTML = `
+    <div class="flabel">Session ID or Join Link</div>
+    <input type="text" id="w-link" placeholder="Paste join link or ABCD-1234" value="${cfg.sessionId||''}">
+    <div class="hint" id="w-hint">Paste a join link or type session ID directly.</div>
+
+    <div class="flabel">Session ID</div>
+    <input type="text" id="w-sid" placeholder="ABCD-1234" value="${cfg.sessionId||''}" style="font-family:monospace;font-size:24px;font-weight:bold;letter-spacing:3px">
+
+    <div class="flabel">Passcode</div>
+    <div class="pw-wrap">
+      <input type="password" id="w-pass" placeholder="Session passcode" value="${cfg.passcode||''}">
+      <button class="pw-toggle" onclick="togglePw()">Show</button>
+    </div>
+
+    <div class="flabel">Presenter / Speaker Name</div>
+    <input type="text" id="w-presenter" value="${cfg.presenter||''}">
+
+    <div class="flabel">Audio Input Device</div>
+    <select id="w-device">${devOpts}</select>
+
+    <div class="msg" id="w-msg" style="margin-top:12px"></div>
+    <button class="btn-test" onclick="testAudio()">Test Audio (2s)</button>`;
+
+  document.getElementById('panel-foot').innerHTML = `<button class="btn-save" onclick="saveWordly()">✓ Save & Close</button>`;
+
+  // Live join link parsing
+  document.getElementById('w-link').addEventListener('input', e => {
+    const {sid, passcode} = parseJoinLink(e.target.value);
+    const hint = document.getElementById('w-hint');
+    if (sid) {
+      document.getElementById('w-sid').value = sid;
+      if (passcode) document.getElementById('w-pass').value = passcode;
+      hint.textContent = `✓ Parsed: ${sid}`; hint.style.color = '#44CC77';
+    } else {
+      hint.textContent = 'Paste a join link or type session ID directly.'; hint.style.color = '#5AA0E9';
+    }
+  });
+}
+
+function togglePw() {
+  const inp = document.getElementById('w-pass');
+  const btn = inp.nextElementSibling;
+  if (inp.type === 'password') { inp.type = 'text'; btn.textContent = 'Hide'; }
+  else { inp.type = 'password'; btn.textContent = 'Show'; }
+}
+
+async function testAudio() {
+  const msg = document.getElementById('w-msg');
+  const devId = document.getElementById('w-device').value;
+  msg.textContent = 'Recording 2s...'; msg.className = 'msg';
+  try {
+    const constraints = devId ? {audio:{deviceId:{exact:devId}}} : {audio:true};
+    const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const ctx    = new AudioContext({sampleRate: SAMPLE_RATE});
+    const src    = ctx.createMediaStreamSource(stream);
+    const anal   = ctx.createAnalyser();
+    src.connect(anal);
+    await new Promise(r => setTimeout(r, 2000));
+    const data = new Uint8Array(anal.frequencyBinCount);
+    anal.getByteTimeDomainData(data);
+    const peak = Math.max(...data.map(v => Math.abs(v - 128))) / 128;
+    stream.getTracks().forEach(t => t.stop());
+    ctx.close();
+    if (peak < 0.02) { msg.textContent = '⚠ No signal — check mic/cable.'; msg.className = 'msg err'; }
+    else { msg.textContent = `✓ Signal detected (${(peak*100).toFixed(0)}% level)`; msg.className = 'msg ok'; }
+  } catch(e) {
+    msg.textContent = '✗ ' + e.message; msg.className = 'msg err';
+  }
+}
+
+function saveWordly() {
+  const linkVal = document.getElementById('w-link').value.trim();
+  const sidVal  = document.getElementById('w-sid').value.trim();
+  const {sid: parsedSid} = parseJoinLink(linkVal);
+  const sid = parsedSid || normalizeSessionId(sidVal);
+  if (!sid) {
+    const m = document.getElementById('w-msg'); m.textContent = 'Invalid session ID.'; m.className = 'msg err'; return;
+  }
+  const pass = document.getElementById('w-pass').value.trim();
+  if (!pass) {
+    const m = document.getElementById('w-msg'); m.textContent = 'Passcode required.'; m.className = 'msg err'; return;
+  }
+  const sel = document.getElementById('w-device');
+  cfg.sessionId  = sid;
+  cfg.passcode   = pass;
+  cfg.presenter  = document.getElementById('w-presenter').value.trim();
+  cfg.deviceId   = sel.value;
+  cfg.deviceLabel= sel.options[sel.selectedIndex]?.text || '';
+  saveCfg(); closePanel();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AUDIO ENGINE — Web Audio API
+// ═══════════════════════════════════════════════════════════════
+async function startAudio() {
+  const constraints = cfg.deviceId ? {audio:{deviceId:{exact:cfg.deviceId},sampleRate:SAMPLE_RATE,channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}} : {audio:{sampleRate:SAMPLE_RATE,channelCount:1,echoCancellation:false,noiseSuppression:false,autoGainControl:false}};
+  mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+  audioCtx    = new AudioContext({sampleRate: SAMPLE_RATE});
+  const src   = audioCtx.createMediaStreamSource(mediaStream);
+
+  // ScriptProcessor for chunk output + meter
+  const bufSize = 4096; // Must be power of 2. 4096 @ 16kHz = ~256ms chunks
+  processor = audioCtx.createScriptProcessor(bufSize, 1, 1);
+  src.connect(processor);
+  processor.connect(audioCtx.destination);
+
+  processor.onaudioprocess = e => {
+    if (muted || !connected || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const float32 = e.inputBuffer.getChannelData(0);
+    // Convert to 16-bit PCM
+    const int16 = new Int16Array(float32.length);
+    let peak = 0;
+    for (let i = 0; i < float32.length; i++) {
+      int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+      const abs = Math.abs(float32[i]);
+      if (abs > peak) peak = abs;
+    }
+    ws.send(int16.buffer);
+    // Update meter
+    const pct = Math.min(peak * 300, 100).toFixed(1);
+    const fill = document.getElementById('meter-fill');
+    if (fill) fill.style.width = pct + '%';
+  };
+}
+
+function stopAudio() {
+  if (processor)    { processor.disconnect(); processor = null; }
+  if (audioCtx)     { audioCtx.close(); audioCtx = null; }
+  if (mediaStream)  { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  const fill = document.getElementById('meter-fill');
+  if (fill) fill.style.width = '0%';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// WSS ENGINE
+// ═══════════════════════════════════════════════════════════════
+function startWSS() {
+  ws = new WebSocket(WSS_ENDPOINT);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    // GOTCHA #9: use "type" not "command", include connectionCode
+    const msg = {
+      type:             'connect',
+      presentationCode: cfg.sessionId,
+      accessKey:        cfg.passcode,
+      connectionCode:   CONNECTION_CODE,
+    };
+    if (cfg.presenter) msg.name = cfg.presenter;
+    ws.send(JSON.stringify(msg));
+  };
+
+  ws.onmessage = e => {
+    if (typeof e.data !== 'string') return;
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === 'status' && data.action === 'connect') {
+        if (data.success) {
+          // Send start
+          ws.send(JSON.stringify({type:'start', languageCode:'en', sampleRate:SAMPLE_RATE}));
+        } else {
+          showError(data.message || 'Connection rejected by Wordly.');
+        }
+      } else if (data.type === 'status' && data.action === 'start') {
+        if (data.success) {
+          connected = true;
+          document.getElementById('s-status').textContent = '● LIVE';
+          if (!timerStart) startTimer();
+        }
+      } else if (data.type === 'result' && data.final) {
+        // Transcript received — could display here
+      } else if (data.type === 'error') {
+        showError(data.message || 'Wordly error.');
+      } else if (data.type === 'end') {
+        if (!intentionalEnd) doEnded('portal');
+      }
+    } catch(e) {}
+  };
+
+  ws.onerror = () => showError('WebSocket error — check network.');
+  ws.onclose = e => {
+    if (connected) showError('Connection dropped — code ' + e.code);
+  };
+}
+
+function wssClose(endForAll) {
+  connected = false;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({type:'stop'}));
+    setTimeout(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({type:'disconnect', end: endForAll}));
+        setTimeout(() => { if (ws) ws.close(); ws = null; }, 300);
+      }
+    }, 200);
+  } catch(e) { ws = null; }
+}
+
+function showError(msg) {
+  stopAudio();
+  connected = false;
+  stopTimer();
+  document.getElementById('e-msg').textContent = msg;
+  showScreen('error');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SESSION CONTROLS
+// ═══════════════════════════════════════════════════════════════
+async function startSession() {
+  if (document.getElementById('btn-start').classList.contains('disabled')) return;
+  muted = false;
+  document.getElementById('screen-streaming').classList.remove('muted');
+  document.getElementById('btn-mute').textContent = 'MUTE';
+  document.getElementById('btn-mute').classList.remove('muted');
+  document.getElementById('s-timer').textContent  = '00:00:00';
+  document.getElementById('s-status').textContent = '◌ Connecting...';
+  document.getElementById('meter-fill').style.width = '0%';
+  showScreen('streaming');
+  try {
+    await startAudio();
+    startWSS();
+  } catch(e) {
+    showError('Mic error: ' + e.message + '\n\nCheck browser mic permission.');
+  }
+}
+
+function toggleMute() {
+  if (muted) {
+    muted = false;
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({type:'start', languageCode:'en', sampleRate:SAMPLE_RATE}));
+    document.getElementById('s-status').textContent = '● LIVE';
+    document.getElementById('screen-streaming').classList.remove('muted');
+    document.getElementById('btn-mute').textContent = 'MUTE';
+    document.getElementById('btn-mute').classList.remove('muted');
+  } else {
+    muted = true;
+    if (ws && ws.readyState === WebSocket.OPEN)
+      ws.send(JSON.stringify({type:'stop'}));
+    document.getElementById('s-status').textContent = '⏸ MUTED';
+    document.getElementById('screen-streaming').classList.add('muted');
+    document.getElementById('btn-mute').textContent = 'UNMUTE';
+    document.getElementById('btn-mute').classList.add('muted');
+    // Flush audio queue by clearing meter
+    document.getElementById('meter-fill').style.width = '0%';
+  }
+}
+
+function doSplit() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({type:'split'})); // GOTCHA #8
+    const b = document.getElementById('btn-split');
+    b.classList.add('flash'); b.textContent = '✓ SPLIT!';
+    setTimeout(() => { b.classList.remove('flash'); b.textContent = '✂ SPLIT'; }, 1800);
+  }
+}
+
+function doLeave() {
+  stopAudio(); stopTimer();
+  wssClose(false);
+  ws = null; connected = false;
+  returnToIdle();
+}
+
+function doEnd() {
+  stopAudio(); stopTimer();
+  connected = false;
+  intentionalEnd = true;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.send(JSON.stringify({type: 'stop'}));
+      ws.send(JSON.stringify({type: 'disconnect', end: true}));
+    } catch(e) {}
+    setTimeout(() => { if (ws) { ws.close(); ws = null; } }, 400);
+  } else {
+    ws = null;
+  }
+  doEnded('local');
+}
+
+function doEnded(reason) {
+  stopAudio(); stopTimer();
+  connected = false;
+  showScreen('ended');
+  document.getElementById('en-sub').textContent =
+    reason === 'portal' ? 'Session closed — returning to setup.'
+  : reason === 'leave'  ? 'You have left. Attendees remain connected.'
+                        : 'Session ended.';
+  startCountdown();
+}
+
+function doQuit() {
+  stopAudio();
+  if (ws) { wssClose(false); ws = null; }
+  window.close();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TIMER + COUNTDOWN
+// ═══════════════════════════════════════════════════════════════
+function startTimer() {
+  timerStart = Date.now();
+  timerInt = setInterval(() => {
+    const e = Math.floor((Date.now() - timerStart) / 1000);
+    document.getElementById('s-timer').textContent =
+      [Math.floor(e/3600), Math.floor((e%3600)/60), e%60].map(n => String(n).padStart(2,'0')).join(':');
+  }, 1000);
+}
+function stopTimer() { clearInterval(timerInt); timerInt = null; timerStart = null; }
+
+function startCountdown() {
+  const endTime = Date.now() + 60000;
+  function tick() {
+    const remaining = Math.ceil((endTime - Date.now()) / 1000);
+    if (remaining <= 0) { cancelCountdown(); returnToIdle(); return; }
+    const el = document.getElementById('en-cd');
+    if (el) el.textContent = `Returning to setup in ${remaining}s...`;
+    cdInt = setTimeout(tick, 500);
+  }
+  tick();
+}
+function cancelCountdown() {
+  clearTimeout(cdInt); cdInt = null;
+  const el = document.getElementById('en-cd');
+  if (el) el.textContent = 'Press button when ready.';
+}
+function returnToIdle() { cancelCountdown(); intentionalEnd = false; loadIdle(); showScreen('idle'); }
+
+// ═══════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════
+loadIdle();
+window.addEventListener('online',  () => checkNetwork());
+window.addEventListener('offline', () => checkNetwork());
+</script>
+</body>
+</html>
