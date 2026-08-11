@@ -366,8 +366,8 @@ def on_leave():
     if audio_eng:
         audio_eng.stop()
         audio_eng = None
-    # Push status immediately — don't wait for WSS cleanup
-    push_status("ended", {"reason": "leave"})
+    # Leave goes back to idle — session continues for attendees
+    push_status("idle")
     _wss = wss
     globals()['wss'] = None
     if _wss:
