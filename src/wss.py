@@ -64,9 +64,13 @@ class WSSStreamer:
         self.audio_q.put(None)
 
     def disconnect(self):
-        # Fire-and-forget — don't block. UI has already updated.
-        if self.loop and self.connected:
-            asyncio.run_coroutine_threadsafe(self._disconnect(), self.loop)
+        # Send disconnect messages first, then stop
+        if self.loop and self.ws:
+            future = asyncio.run_coroutine_threadsafe(self._disconnect(), self.loop)
+            try:
+                future.result(timeout=3.0)  # wait for messages to send
+            except Exception as e:
+                log.warning(f"Disconnect send error: {e}")
         self.stop()
 
     def _run(self):
