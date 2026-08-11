@@ -177,9 +177,7 @@ def _stop_all():
                 log.info("Background disconnect complete")
             except Exception as e:
                 log.warning(f"Background disconnect error: {e}")
-        import threading
-        t = threading.Thread(target=_bg_disconnect, daemon=False)  # non-daemon so it completes
-        t.start()
+        sio.start_background_task(_bg_disconnect)
 
 # ── HTTP ROUTES ───────────────────────────────────────────────────────────────
 
